@@ -1,0 +1,8 @@
+node_modules/
+
+# live store data — orders, customers, settings (never commit personal data)
+data/db.json
+data/db.json.tmp
+
+# admin-uploaded media (hero video, product images)
+uploads/

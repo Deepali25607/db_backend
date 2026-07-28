@@ -1,0 +1,23 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "boot.js",
+  "scripts": {
+    "start": "node boot.js",
+    "dev": "nodemon boot.js",
+    "test": "node --test",
+    "test:e2e": "node e2e/smoke.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "express": "^5.2.1",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "playwright-core": "^1.62.0"
+  }
+}
