@@ -142,6 +142,11 @@ async function init() {
       connectionString: DATABASE_URL,
       max: 5,
       connectionTimeoutMillis: 5000,
+      // managed Postgres (Render, Neon, Supabase, …) requires TLS; local
+      // containers don't speak it
+      ssl: /localhost|127\.0\.0\.1/.test(DATABASE_URL)
+        ? false
+        : { rejectUnauthorized: false },
     });
     await pool.query(`
       CREATE TABLE IF NOT EXISTS collections (

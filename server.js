@@ -3242,11 +3242,26 @@ app.patch("/api/admin/appointments/:id", requireAdmin, (req, res) => {
 });
 
 // ------------------------------------------------------------------ static
-const dist = path.join(__dirname, "..", "dp-frontent", "dist");
-app.use(express.static(dist));
-app.get(/^\/(?!api\/).*/, (req, res, next) => {
-  res.sendFile(path.join(dist, "index.html"), (err) => err && next());
-});
+// Locally the backend also serves the built storefront. In cloud deploys
+// (Render + Vercel) the frontend lives elsewhere, so when no dist exists the
+// non-API routes answer with a service banner instead of a 404 — keeps the
+// platform health checks green.
+const DIST_CANDIDATES = [
+  path.join(__dirname, "..", "dp-frontend", "dist"),
+  path.join(__dirname, "..", "dp-frontent", "dist"),
+  path.join(__dirname, "..", "..", "dp-frontend", "dist"),
+];
+const dist = DIST_CANDIDATES.find((d) => fs.existsSync(path.join(d, "index.html")));
+if (dist) {
+  app.use(express.static(dist));
+  app.get(/^\/(?!api\/).*/, (req, res, next) => {
+    res.sendFile(path.join(dist, "index.html"), (err) => err && next());
+  });
+} else {
+  app.get(/^\/(?!api\/).*/, (req, res) => {
+    res.json({ ok: true, service: "dp-jewellers-api", health: "/api/health" });
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`DP Jewellers API running on http://localhost:${PORT}`);
