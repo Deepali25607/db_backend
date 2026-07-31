@@ -760,6 +760,34 @@ test("customer profiles: admin list and per-phone detail across guests too", asy
   assert.equal(missing.status, 404);
 });
 
+test("regional footfall: orders grouped by PIN circle, showroom bookings counted", async () => {
+  assert.equal((await api("/api/admin/footfall")).status, 401);
+
+  // the suite's buyer ships to 452001 → Madhya Pradesh
+  const before = (await api("/api/admin/footfall", { headers: ADMIN })).data;
+  const mp = before.regions.find((r) => r.region === "Madhya Pradesh");
+  assert.ok(mp, "Madhya Pradesh present from the 452001 test orders");
+  assert.ok(mp.customers >= 1 && mp.orders >= 1 && mp.revenue > 0);
+
+  // a Delhi buyer (110001) shows up under Delhi NCR
+  const { data: list } = await api("/api/products?sort=price-asc&limit=1");
+  const cheap = list.items[0];
+  const placed = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: JSON.stringify({
+      items: [{ slug: cheap.slug, size: cheap.sizes?.[0], qty: 1 }],
+      customer: { name: "Delhi Buyer", phone: "9811100022", address: "1 Connaught Place, Delhi", pincode: "110001" },
+      payment: { mode: "upi" },
+    }),
+  });
+  assert.equal(placed.status, 201);
+  const after = (await api("/api/admin/footfall", { headers: ADMIN })).data;
+  const delhi = after.regions.find((r) => r.region === "Delhi NCR");
+  assert.ok(delhi, "Delhi NCR appears after the 110001 order");
+  assert.equal(delhi.customers, 1);
+  assert.ok(Array.isArray(after.showrooms));
+});
+
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {
   const bytes = Buffer.from("fake-mp4-bytes-for-upload-test");
   const up = await fetch(`${BASE}/api/admin/uploads?name=${encodeURIComponent("Hero Clip.MP4")}`, {

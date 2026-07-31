@@ -939,6 +939,69 @@ app.patch("/api/admin/callbacks/:id", requireAdmin, (req, res) => {
   res.json({ ok: true, request });
 });
 
+// ---------------- regional footfall (back office) -------------------------
+// Indian PIN codes group into postal circles: the first two digits identify
+// the region. Orders are mapped by their delivery PIN; showroom appointment
+// bookings give the literal walk-in footfall.
+const PIN_CIRCLES = [
+  [["11"], "Delhi NCR"],
+  [["12", "13"], "Haryana"],
+  [["14", "15", "16"], "Punjab & Chandigarh"],
+  [["17"], "Himachal Pradesh"],
+  [["18", "19"], "Jammu & Kashmir"],
+  [["20", "21", "22", "23", "24", "25", "26", "27", "28"], "Uttar Pradesh & Uttarakhand"],
+  [["30", "31", "32", "33", "34"], "Rajasthan"],
+  [["36", "37", "38", "39"], "Gujarat"],
+  [["40", "41", "42", "43", "44"], "Maharashtra & Goa"],
+  [["45", "46", "47", "48"], "Madhya Pradesh"],
+  [["49"], "Chhattisgarh"],
+  [["50"], "Telangana"],
+  [["51", "52", "53"], "Andhra Pradesh"],
+  [["56", "57", "58", "59"], "Karnataka"],
+  [["60", "61", "62", "63", "64"], "Tamil Nadu & Puducherry"],
+  [["67", "68", "69"], "Kerala"],
+  [["70", "71", "72", "73", "74"], "West Bengal & Sikkim"],
+  [["75", "76", "77"], "Odisha"],
+  [["78"], "Assam"],
+  [["79"], "North-East"],
+  [["80", "81", "82", "83", "84", "85"], "Bihar & Jharkhand"],
+];
+const PIN_REGION = new Map();
+for (const [prefixes, name] of PIN_CIRCLES)
+  for (const p of prefixes) PIN_REGION.set(p, name);
+
+function pinRegion(pin) {
+  const s = String(pin || "");
+  return /^[1-9]\d{5}$/.test(s)
+    ? PIN_REGION.get(s.slice(0, 2)) || "Other regions"
+    : "PIN not recorded";
+}
+
+app.get("/api/admin/footfall", requireAdmin, (req, res) => {
+  const regions = new Map();
+  for (const o of db.orders) {
+    const name = pinRegion(o.customer.pincode);
+    if (!regions.has(name))
+      regions.set(name, { region: name, phones: new Set(), orders: 0, revenue: 0 });
+    const r = regions.get(name);
+    r.phones.add(o.customer.phone);
+    r.orders += 1;
+    if (!["Cancelled", "Refunded"].includes(o.status)) r.revenue += o.payable ?? o.total;
+  }
+  const showrooms = new Map();
+  for (const a of db.appointments || []) {
+    showrooms.set(a.storeName, (showrooms.get(a.storeName) || 0) + 1);
+  }
+  res.json({
+    regions: [...regions.values()]
+      .map(({ region, phones, orders, revenue }) => ({ region, customers: phones.size, orders, revenue }))
+      .sort((a, b) => b.customers - a.customers || b.orders - a.orders),
+    showrooms: [...showrooms.entries()]
+      .map(([storeName, visits]) => ({ storeName, visits }))
+      .sort((a, b) => b.visits - a.visits),
+  });
+});
+
 // ---------------- customer profiles (back office) -------------------------
 // One row per phone number: registered accounts AND guest buyers. Reads only —
 // never creates loyalty accounts as a side effect.
