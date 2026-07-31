@@ -1337,4 +1337,30 @@ test("header & footer are admin-editable; empty lists restore defaults", async (
   assert.equal(restored.navLinks.length, 5);
   assert.equal(restored.footerColumns.length, 3);
   assert.match(restored.footerBlurb, /Three generations/);
+
+  // header and footer background pictures: URL-validated, blank = plain
+  assert.equal(restored.headerBgImage, "");
+  assert.equal(restored.footerBgImage, "");
+  const setBgs = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      headerBgImage: "/api/uploads/silk-weave-h1.jpg",
+      footerBgImage: "/api/uploads/silk-weave-f1.jpg",
+    }),
+  });
+  assert.equal(setBgs.status, 200);
+  const withBgs = (await api("/api/content")).data;
+  assert.equal(withBgs.headerBgImage, "/api/uploads/silk-weave-h1.jpg");
+  assert.equal(withBgs.footerBgImage, "/api/uploads/silk-weave-f1.jpg");
+  const badBg = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ headerBgImage: "not a url" }),
+  });
+  assert.equal(badBg.status, 400);
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ headerBgImage: "", footerBgImage: "" }),
+  });
+  const plain = (await api("/api/content")).data;
+  assert.equal(plain.headerBgImage, "");
+  assert.equal(plain.footerBgImage, "");
 });

@@ -1328,6 +1328,10 @@ const DEFAULT_CONTENT = {
   // optional picture behind the whole site (Appearance setting) — shown under
   // a translucent wash of the theme's surface colour; blank = plain theme
   backgroundImage: "",
+  // optional pictures behind the header bar and the footer (Header & footer
+  // setting) — each under the same readability wash; blank = plain surface
+  headerBgImage: "",
+  footerBgImage: "",
   // header navigation and footer structure (Header & footer setting).
   // Empty arrays restore these defaults; paths are /internal or https://.
   navLinks: [
@@ -1415,7 +1419,7 @@ app.post(
   }
 );
 
-const CONTENT_URL_FIELDS = ["heroImage", "heroVideo", "backgroundImage"];
+const CONTENT_URL_FIELDS = ["heroImage", "heroVideo", "backgroundImage", "headerBgImage", "footerBgImage"];
 // editable copy, with per-field length caps; empty = back to the house default
 const CONTENT_TEXT_LIMITS = {
   companyName: 40,
@@ -1436,8 +1440,9 @@ const CONTENT_TEXT_LIMITS = {
 // (heroImage may stay blank — e.g. when a video is the hero — the storefront
 // falls back to its built-in image only if the video is also unset)
 const CONTENT_BLANK_OK = new Set([
-  "heroImage", "heroVideo", "backgroundImage", "supportPhone", "supportWhatsapp",
-  "supportEmail", "supportMessage", "returnPolicyMessage",
+  "heroImage", "heroVideo", "backgroundImage", "headerBgImage", "footerBgImage",
+  "supportPhone", "supportWhatsapp", "supportEmail", "supportMessage",
+  "returnPolicyMessage",
 ]);
 
 app.patch("/api/admin/content", requireAdmin, (req, res) => {
