@@ -797,11 +797,17 @@ test("appearance theme: curated keys only, blank restores the default", async ()
   assert.equal(set.status, 200);
   assert.equal((await api("/api/content")).data.theme, "champagne");
 
+  const dark = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "midnight" }),
+  });
+  assert.equal(dark.status, 200);
+  assert.equal((await api("/api/content")).data.theme, "midnight");
+
   const junk = await api("/api/admin/content", {
     method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "neon-disco" }),
   });
   assert.equal(junk.status, 400);
-  assert.match(junk.data.error, /heritage, pearl, champagne, sage, blush/);
+  assert.match(junk.data.error, /heritage, pearl, champagne, sage, blush, midnight/);
 
   await api("/api/admin/content", {
     method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "" }),

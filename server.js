@@ -1378,7 +1378,7 @@ const DEFAULT_CONTENT = {
 };
 // Curated background palettes the storefront ships CSS for — free-form
 // values are refused so the admin can't pick a look that doesn't exist.
-const SITE_THEMES = ["heritage", "pearl", "champagne", "sage", "blush"];
+const SITE_THEMES = ["heritage", "pearl", "champagne", "sage", "blush", "midnight"];
 if (!db.content || typeof db.content !== "object") db.content = {};
 db.content = Object.assign({}, DEFAULT_CONTENT, db.content);
 
