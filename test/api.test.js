@@ -807,6 +807,23 @@ test("appearance theme: curated keys only, blank restores the default", async ()
     method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "" }),
   });
   assert.equal((await api("/api/content")).data.theme, "heritage");
+
+  // background picture: URL-validated, blank means none (no default bounce)
+  assert.equal((await api("/api/content")).data.backgroundImage, "");
+  const setBg = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ backgroundImage: "/api/uploads/marble-texture-x1.jpg" }),
+  });
+  assert.equal(setBg.status, 200);
+  assert.equal((await api("/api/content")).data.backgroundImage, "/api/uploads/marble-texture-x1.jpg");
+  const badBg = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ backgroundImage: "not a url" }),
+  });
+  assert.equal(badBg.status, 400);
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ backgroundImage: "" }),
+  });
+  assert.equal((await api("/api/content")).data.backgroundImage, "");
 });
 
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {

@@ -1325,6 +1325,9 @@ const DEFAULT_CONTENT = {
   returnPolicyMessage: "",
   // site-wide background theme (Appearance setting) — a key from SITE_THEMES
   theme: "heritage",
+  // optional picture behind the whole site (Appearance setting) — shown under
+  // a translucent wash of the theme's surface colour; blank = plain theme
+  backgroundImage: "",
 };
 // Curated background palettes the storefront ships CSS for — free-form
 // values are refused so the admin can't pick a look that doesn't exist.
@@ -1369,7 +1372,7 @@ app.post(
   }
 );
 
-const CONTENT_URL_FIELDS = ["heroImage", "heroVideo"];
+const CONTENT_URL_FIELDS = ["heroImage", "heroVideo", "backgroundImage"];
 // editable copy, with per-field length caps; empty = back to the house default
 const CONTENT_TEXT_LIMITS = {
   companyName: 40,
@@ -1389,8 +1392,8 @@ const CONTENT_TEXT_LIMITS = {
 // (heroImage may stay blank — e.g. when a video is the hero — the storefront
 // falls back to its built-in image only if the video is also unset)
 const CONTENT_BLANK_OK = new Set([
-  "heroImage", "heroVideo", "supportPhone", "supportWhatsapp", "supportEmail",
-  "supportMessage", "returnPolicyMessage",
+  "heroImage", "heroVideo", "backgroundImage", "supportPhone", "supportWhatsapp",
+  "supportEmail", "supportMessage", "returnPolicyMessage",
 ]);
 
 app.patch("/api/admin/content", requireAdmin, (req, res) => {
