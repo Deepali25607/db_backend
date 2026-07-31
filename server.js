@@ -1328,6 +1328,49 @@ const DEFAULT_CONTENT = {
   // optional picture behind the whole site (Appearance setting) — shown under
   // a translucent wash of the theme's surface colour; blank = plain theme
   backgroundImage: "",
+  // header navigation and footer structure (Header & footer setting).
+  // Empty arrays restore these defaults; paths are /internal or https://.
+  navLinks: [
+    { label: "Home", path: "/" },
+    { label: "Shop", path: "/shop" },
+    { label: "Gold Scheme", path: "/gold-scheme" },
+    { label: "Custom", path: "/custom" },
+    { label: "The House", path: "/#maison" },
+  ],
+  footerBlurb:
+    "Three generations of goldsmiths. Every piece BIS-hallmarked with HUID, certified, and priced transparently on the day's metal rate.",
+  footerColumns: [
+    {
+      title: "Shop",
+      links: [
+        { label: "Rings", path: "/shop?category=rings" },
+        { label: "Necklaces", path: "/shop?category=necklaces" },
+        { label: "Earrings", path: "/shop?category=earrings" },
+        { label: "Bangles & Bracelets", path: "/shop?category=bangles,bracelets" },
+        { label: "Mangalsutra", path: "/shop?category=mangalsutra" },
+      ],
+    },
+    {
+      title: "Client Services",
+      links: [
+        { label: "Track an order", path: "/track" },
+        { label: "Gold savings scheme", path: "/gold-scheme" },
+        { label: "Returns & exchange", path: "/track" },
+        { label: "Old-gold exchange & buyback", path: "/old-gold" },
+        { label: "Custom & made-to-order", path: "/custom" },
+        { label: "Buying guides", path: "/guides" },
+        { label: "My account", path: "/account" },
+      ],
+    },
+    {
+      title: "The House",
+      links: [
+        { label: "Our story", path: "/#maison" },
+        { label: "Showrooms", path: "/stores" },
+        { label: "Book an appointment", path: "/appointments" },
+      ],
+    },
+  ],
 };
 // Curated background palettes the storefront ships CSS for — free-form
 // values are refused so the admin can't pick a look that doesn't exist.
@@ -1387,6 +1430,7 @@ const CONTENT_TEXT_LIMITS = {
   supportEmail: 80,
   supportMessage: 500,
   returnPolicyMessage: 500,
+  footerBlurb: 300,
 };
 // fields where empty means "hidden/off", not "restore the house default"
 // (heroImage may stay blank — e.g. when a video is the hero — the storefront
@@ -1399,6 +1443,52 @@ const CONTENT_BLANK_OK = new Set([
 app.patch("/api/admin/content", requireAdmin, (req, res) => {
   const changes = [];
   for (const [key, raw] of Object.entries(req.body || {})) {
+    // header nav / footer columns are structured lists, not strings.
+    // An empty array restores the house default.
+    if (key === "navLinks" || key === "footerColumns") {
+      if (!Array.isArray(raw))
+        return res.status(400).json({ error: `${key} must be a list.` });
+      const LINK_RE = /^(\/[^\s"']*|https?:\/\/[^\s"']+)$/i;
+      const cleanLink = (l, labelMax) => {
+        const label = String(l?.label || "").trim();
+        const path = String(l?.path || "").trim();
+        if (!label || label.length > labelMax) return null;
+        if (!LINK_RE.test(path) || path.length > 300) return null;
+        return { label, path };
+      };
+      let value;
+      if (raw.length === 0) {
+        value = structuredClone(DEFAULT_CONTENT[key]);
+      } else if (key === "navLinks") {
+        if (raw.length > 7)
+          return res.status(400).json({ error: "Up to 7 header links keep the navigation elegant." });
+        value = raw.map((l) => cleanLink(l, 24));
+        if (value.some((l) => !l))
+          return res.status(400).json({
+            error: "Each header link needs a label (up to 24 characters) and a /path or https:// URL.",
+          });
+      } else {
+        if (raw.length > 4)
+          return res.status(400).json({ error: "Up to 4 footer columns." });
+        value = [];
+        for (const col of raw) {
+          const title = String(col?.title || "").trim();
+          if (!title || title.length > 30)
+            return res.status(400).json({ error: "Each footer column needs a title (up to 30 characters)." });
+          if (!Array.isArray(col?.links) || col.links.length < 1 || col.links.length > 8)
+            return res.status(400).json({ error: `Column ${title || "?"} needs 1 to 8 links.` });
+          const links = col.links.map((l) => cleanLink(l, 40));
+          if (links.some((l) => !l))
+            return res.status(400).json({
+              error: `Column ${title}: each link needs a label (up to 40 characters) and a /path or https:// URL.`,
+            });
+          value.push({ title, links });
+        }
+      }
+      if (JSON.stringify(db.content[key] || []) !== JSON.stringify(value))
+        changes.push({ key, to: value, label: `${value.length} ${key === "navLinks" ? "links" : "columns"}` });
+      continue;
+    }
     // appearance: only curated theme keys exist in the storefront CSS
     if (key === "theme") {
       const value = String(raw || "").trim() || "heritage";

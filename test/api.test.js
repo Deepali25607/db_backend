@@ -1282,3 +1282,59 @@ test("product image gallery: admin sets 1-8 images, first is the cover", async (
     method: "PATCH", headers: ADMIN, body: JSON.stringify({ images: original }),
   });
 });
+
+test("header & footer are admin-editable; empty lists restore defaults", async () => {
+  const before = (await api("/api/content")).data;
+  assert.equal(before.navLinks.length, 5);
+  assert.equal(before.footerColumns.length, 3);
+  assert.match(before.footerBlurb, /Three generations/);
+
+  // custom nav + footer
+  const set = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      navLinks: [
+        { label: "Home", path: "/" },
+        { label: "Bridal", path: "/shop?occasion=wedding" },
+        { label: "Blog", path: "https://blog.dpjewellers.example" },
+      ],
+      footerBlurb: "Jewellery priced on the day's rate, always.",
+      footerColumns: [
+        { title: "Quick links", links: [{ label: "Track", path: "/track" }, { label: "Schemes", path: "/gold-scheme" }] },
+      ],
+    }),
+  });
+  assert.equal(set.status, 200);
+  const pub = (await api("/api/content")).data;
+  assert.equal(pub.navLinks.length, 3);
+  assert.equal(pub.navLinks[2].path, "https://blog.dpjewellers.example");
+  assert.equal(pub.footerColumns[0].title, "Quick links");
+  assert.match(pub.footerBlurb, /always/);
+
+  // guard rails
+  const tooMany = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ navLinks: Array(8).fill({ label: "X", path: "/" }) }),
+  });
+  assert.equal(tooMany.status, 400);
+  const badPath = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ navLinks: [{ label: "Bad", path: "javascript:alert(1)" }] }),
+  });
+  assert.equal(badPath.status, 400);
+  const noTitle = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ footerColumns: [{ title: "", links: [{ label: "A", path: "/" }] }] }),
+  });
+  assert.equal(noTitle.status, 400);
+
+  // empty lists restore the standard layout
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ navLinks: [], footerColumns: [], footerBlurb: "" }),
+  });
+  const restored = (await api("/api/content")).data;
+  assert.equal(restored.navLinks.length, 5);
+  assert.equal(restored.footerColumns.length, 3);
+  assert.match(restored.footerBlurb, /Three generations/);
+});
