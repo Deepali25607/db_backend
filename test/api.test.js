@@ -730,6 +730,36 @@ test("homepage promotion slides: images linked to products, validated", async ()
   assert.deepEqual((await api("/api/content")).data.heroSlides, []);
 });
 
+test("customer profiles: admin list and per-phone detail across guests too", async () => {
+  const noKey = await api("/api/admin/customers");
+  assert.equal(noKey.status, 401);
+
+  // the suite's test buyer (9800000001) has placed orders without an account
+  const rows = (await api("/api/admin/customers", { headers: ADMIN })).data;
+  const buyer = rows.find((r) => r.phone === "9800000001");
+  assert.ok(buyer, "guest buyer appears in the customer list");
+  assert.equal(buyer.registered, false);
+  assert.ok(buyer.orders >= 1);
+  assert.ok(buyer.spend > 0);
+  assert.equal(buyer.name, "Test Buyer");
+
+  const detail = (await api("/api/admin/customers/9800000001", { headers: ADMIN })).data;
+  assert.equal(detail.name, "Test Buyer");
+  assert.equal(detail.account, null);
+  assert.equal(detail.stats.orders, buyer.orders);
+  assert.ok(detail.orders.length >= 1);
+  assert.ok(detail.orders[0].orderId.startsWith("DPJ"));
+  assert.ok(Array.isArray(detail.returns) && Array.isArray(detail.schemes) && Array.isArray(detail.callbacks));
+
+  // lifetime value counts only non-cancelled, non-refunded orders
+  const validSum = detail.orders.filter((o) => !["Cancelled", "Refunded"].includes(o.status))
+    .reduce((s, o) => s + o.payable, 0);
+  assert.equal(detail.stats.spend, validSum);
+
+  const missing = await api("/api/admin/customers/9899999998", { headers: ADMIN });
+  assert.equal(missing.status, 404);
+});
+
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {
   const bytes = Buffer.from("fake-mp4-bytes-for-upload-test");
   const up = await fetch(`${BASE}/api/admin/uploads?name=${encodeURIComponent("Hero Clip.MP4")}`, {

@@ -939,6 +939,89 @@ app.patch("/api/admin/callbacks/:id", requireAdmin, (req, res) => {
   res.json({ ok: true, request });
 });
 
+// ---------------- customer profiles (back office) -------------------------
+// One row per phone number: registered accounts AND guest buyers. Reads only —
+// never creates loyalty accounts as a side effect.
+app.get("/api/admin/customers", requireAdmin, (req, res) => {
+  const rows = new Map();
+  for (const c of db.customers)
+    rows.set(c.phone, {
+      phone: c.phone, name: c.name, email: c.email, registered: true,
+      since: c.createdAt, orders: 0, spend: 0, lastOrderAt: null,
+    });
+  for (const o of db.orders) {
+    const phone = o.customer.phone;
+    if (!rows.has(phone))
+      rows.set(phone, {
+        phone, name: o.customer.name, email: null, registered: false,
+        since: null, orders: 0, spend: 0, lastOrderAt: null,
+      });
+    const r = rows.get(phone);
+    if (!r.name) r.name = o.customer.name;
+    r.orders += 1;
+    if (!["Cancelled", "Refunded"].includes(o.status)) r.spend += o.payable ?? o.total;
+    if (!r.lastOrderAt || o.placedAt > r.lastOrderAt) r.lastOrderAt = o.placedAt;
+  }
+  const out = [...rows.values()]
+    .map((r) => {
+      const acc = db.loyalty[r.phone];
+      return { ...r, points: acc?.points ?? 0, tier: acc ? tierOf(acc).name : "Silver" };
+    })
+    .sort((a, b) => String(b.lastOrderAt || b.since || "").localeCompare(String(a.lastOrderAt || a.since || "")));
+  res.json(out);
+});
+
+app.get("/api/admin/customers/:phone", requireAdmin, (req, res) => {
+  const phone = String(req.params.phone).trim();
+  const account = db.customers.find((c) => c.phone === phone) || null;
+  const orders = db.orders.filter((o) => o.customer.phone === phone);
+  const schemes = db.schemes.filter((s) => s.customer?.phone === phone);
+  const enquiries = (db.enquiries || []).filter((e) => e.phone === phone);
+  const appointments = (db.appointments || []).filter((a) => a.phone === phone);
+  if (!account && orders.length === 0 && schemes.length === 0 && enquiries.length === 0 && appointments.length === 0)
+    return res.status(404).json({ error: "No customer with that mobile number." });
+
+  const valid = orders.filter((o) => !["Cancelled", "Refunded"].includes(o.status));
+  const acc = db.loyalty[phone] || null;
+  res.json({
+    phone,
+    name: account?.name || orders.at(-1)?.customer.name || appointments.at(-1)?.name || enquiries.at(-1)?.name || null,
+    account: account
+      ? {
+          email: account.email, dob: account.dob, anniversary: account.anniversary,
+          ringSize: account.ringSize, createdAt: account.createdAt, addresses: account.addresses,
+        }
+      : null,
+    stats: {
+      orders: orders.length,
+      spend: valid.reduce((s, o) => s + (o.payable ?? o.total), 0),
+      lastOrderAt: orders.at(-1)?.placedAt || null,
+    },
+    orders: [...orders].reverse().map((o) => ({
+      orderId: o.orderId, placedAt: o.placedAt, status: o.status,
+      payable: o.payable ?? o.total, payMode: o.payment.mode,
+      items: o.lines.map((l) => `${l.name}${l.qty > 1 ? ` ×${l.qty}` : ""}`).join(", "),
+    })),
+    returns: [...db.returns.filter((r) => r.phone === phone)].reverse()
+      .map(({ id, orderId, itemName, type, status, refundAmount }) => ({ id, orderId, itemName, type, status, refundAmount })),
+    schemes: schemes.map((s) => ({
+      id: s.id, variant: s.variant, monthly: s.monthlyAmount, status: s.status,
+      instalmentsPaid: s.instalments.length, startedAt: s.startedAt,
+    })),
+    loyalty: acc
+      ? { points: acc.points, lifetimeSpend: acc.lifetimeSpend, tier: tierOf(acc).name,
+          referralCode: acc.referralCode, ledger: [...acc.ledger].slice(-8).reverse() }
+      : null,
+    callbacks: [...db.callbacks.filter((c) => c.phone === phone)].reverse()
+      .map(({ id, at, productName, status }) => ({ id, at, productName, status })),
+    appointments: [...appointments].reverse()
+      .map(({ id, date, slot, storeName, productName, status }) => ({ id, date, slot, storeName, productName, status })),
+    enquiries: [...enquiries].reverse().map(({ id, status, budgetBand, description }) => ({
+      id, status, budgetBand, description: String(description || "").slice(0, 80),
+    })),
+  });
+});
+
 // ---------------- GST tax invoice (BRD 8.4) -------------------------------
 // Fetched by the customer (orderId + phone) or by the back office (admin
 // key in header or ?key=, since browser links can't set headers).
