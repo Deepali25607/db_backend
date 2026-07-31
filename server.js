@@ -1232,9 +1232,11 @@ const CONTENT_TEXT_LIMITS = {
   returnPolicyMessage: 500,
 };
 // fields where empty means "hidden/off", not "restore the house default"
+// (heroImage may stay blank — e.g. when a video is the hero — the storefront
+// falls back to its built-in image only if the video is also unset)
 const CONTENT_BLANK_OK = new Set([
-  "heroVideo", "supportPhone", "supportWhatsapp", "supportEmail", "supportMessage",
-  "returnPolicyMessage",
+  "heroImage", "heroVideo", "supportPhone", "supportWhatsapp", "supportEmail",
+  "supportMessage", "returnPolicyMessage",
 ]);
 
 app.patch("/api/admin/content", requireAdmin, (req, res) => {

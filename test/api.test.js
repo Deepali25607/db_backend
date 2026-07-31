@@ -670,13 +670,20 @@ test("hero media content is publicly readable and admin-editable", async () => {
   const pub = await api("/api/content");
   assert.equal(pub.data.heroVideo, "https://cdn.example/hero.mp4");
 
-  // clearing heroImage falls back to the default rather than a blank hero
+  // both fields may be blank (video-only heroes clear the image; the
+  // storefront falls back to its built-in image when both are empty)
   await api("/api/admin/content", {
     method: "PATCH", headers: ADMIN, body: JSON.stringify({ heroImage: "", heroVideo: "" }),
   });
-  const restored = await api("/api/content");
-  assert.ok(restored.data.heroImage.startsWith("http"));
-  assert.equal(restored.data.heroVideo, "");
+  const cleared = await api("/api/content");
+  assert.equal(cleared.data.heroImage, "");
+  assert.equal(cleared.data.heroVideo, "");
+
+  // restore the default hero image for later tests
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ heroImage: "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?q=80&w=1600&auto=format&fit=crop" }),
+  });
 });
 
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {
