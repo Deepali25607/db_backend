@@ -686,6 +686,50 @@ test("hero media content is publicly readable and admin-editable", async () => {
   });
 });
 
+test("homepage promotion slides: images linked to products, validated", async () => {
+  const { data: list } = await api("/api/products?limit=1");
+  const slug = list.items[0].slug;
+
+  const set = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      heroSlides: [
+        { image: "/api/uploads/diwali-promo-abc.jpg", slug },
+        { image: "https://cdn.example/plain-banner.jpg" },
+      ],
+    }),
+  });
+  assert.equal(set.status, 200);
+  const pub = (await api("/api/content")).data;
+  assert.equal(pub.heroSlides.length, 2);
+  assert.equal(pub.heroSlides[0].slug, slug);
+  assert.equal(pub.heroSlides[1].slug, null);
+
+  // guard rails: bad image, unknown product, too many slides
+  const badImg = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ heroSlides: [{ image: "not a url", slug }] }),
+  });
+  assert.equal(badImg.status, 400);
+  const badSlug = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ heroSlides: [{ image: "/img/x.jpg", slug: "no-such-piece" }] }),
+  });
+  assert.equal(badSlug.status, 400);
+  assert.match(badSlug.data.error, /not a published product/);
+  const tooMany = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ heroSlides: Array(7).fill({ image: "/img/x.jpg" }) }),
+  });
+  assert.equal(tooMany.status, 400);
+
+  // empty list clears the promotion
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ heroSlides: [] }),
+  });
+  assert.deepEqual((await api("/api/content")).data.heroSlides, []);
+});
+
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {
   const bytes = Buffer.from("fake-mp4-bytes-for-upload-test");
   const up = await fetch(`${BASE}/api/admin/uploads?name=${encodeURIComponent("Hero Clip.MP4")}`, {

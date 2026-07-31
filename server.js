@@ -1159,6 +1159,9 @@ app.patch("/api/admin/config", requireAdmin, (req, res) => {
 const DEFAULT_CONTENT = {
   heroImage: "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?q=80&w=1600&auto=format&fit=crop",
   heroVideo: "",
+  // homepage promotion slides: [{ image, slug }] — each image may link to a
+  // product; the hero rotates through them (the video, when set, wins)
+  heroSlides: [],
   companyName: "DP Jewellers",
   companyTagline: "Fine Jewellery",
   heroEyebrow: "Est. 1962 · BIS Hallmarked",
@@ -1242,6 +1245,28 @@ const CONTENT_BLANK_OK = new Set([
 app.patch("/api/admin/content", requireAdmin, (req, res) => {
   const changes = [];
   for (const [key, raw] of Object.entries(req.body || {})) {
+    // promotion slides are structured, not a string
+    if (key === "heroSlides") {
+      if (!Array.isArray(raw))
+        return res.status(400).json({ error: "heroSlides must be a list of slides." });
+      if (raw.length > 6)
+        return res.status(400).json({ error: "Up to 6 promotion slides on the homepage." });
+      const slides = [];
+      for (const s of raw) {
+        const image = String(s?.image || "").trim();
+        const slug = String(s?.slug || "").trim();
+        if (!/^(https?:\/\/|\/)[^\s"']+$/i.test(image) || image.length > 600)
+          return res.status(400).json({
+            error: "Each slide needs an image (https://… or a /path on this site).",
+          });
+        if (slug && !published().some((p) => p.slug === slug))
+          return res.status(400).json({ error: `"${slug}" is not a published product.` });
+        slides.push({ image, slug: slug || null });
+      }
+      if (JSON.stringify(db.content.heroSlides || []) !== JSON.stringify(slides))
+        changes.push({ key, to: slides, label: `${slides.length} slide${slides.length === 1 ? "" : "s"}` });
+      continue;
+    }
     const value = String(raw || "").trim();
     if (CONTENT_URL_FIELDS.includes(key)) {
       if (value && !/^(https?:\/\/|\/)[^\s"']+$/i.test(value))
@@ -1271,7 +1296,7 @@ app.patch("/api/admin/content", requireAdmin, (req, res) => {
   // empty text/image fields fall back to the house defaults (blank-ok fields stay empty)
   for (const key of Object.keys(DEFAULT_CONTENT))
     if (!CONTENT_BLANK_OK.has(key) && !db.content[key]) db.content[key] = DEFAULT_CONTENT[key];
-  audit("content", changes.map((c) => `${c.key} → ${c.to || "(reset to default)"}`).join(", "));
+  audit("content", changes.map((c) => `${c.key} → ${c.label || c.to || "(reset to default)"}`).join(", "));
   save();
   res.json({ ok: true, content: db.content, changed: changes.length });
 });
