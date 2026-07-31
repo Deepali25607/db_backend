@@ -1323,7 +1323,12 @@ const DEFAULT_CONTENT = {
   supportMessage: "",
   // order policy copy shown on the tracking page — blank hides the line
   returnPolicyMessage: "",
+  // site-wide background theme (Appearance setting) — a key from SITE_THEMES
+  theme: "heritage",
 };
+// Curated background palettes the storefront ships CSS for — free-form
+// values are refused so the admin can't pick a look that doesn't exist.
+const SITE_THEMES = ["heritage", "pearl", "champagne", "sage", "blush"];
 if (!db.content || typeof db.content !== "object") db.content = {};
 db.content = Object.assign({}, DEFAULT_CONTENT, db.content);
 
@@ -1391,6 +1396,16 @@ const CONTENT_BLANK_OK = new Set([
 app.patch("/api/admin/content", requireAdmin, (req, res) => {
   const changes = [];
   for (const [key, raw] of Object.entries(req.body || {})) {
+    // appearance: only curated theme keys exist in the storefront CSS
+    if (key === "theme") {
+      const value = String(raw || "").trim() || "heritage";
+      if (!SITE_THEMES.includes(value))
+        return res.status(400).json({
+          error: `Unknown theme "${value}". Available: ${SITE_THEMES.join(", ")}.`,
+        });
+      if (db.content.theme !== value) changes.push({ key, to: value });
+      continue;
+    }
     // promotion slides are structured, not a string
     if (key === "heroSlides") {
       if (!Array.isArray(raw))

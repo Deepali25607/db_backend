@@ -788,6 +788,27 @@ test("regional footfall: orders grouped by PIN circle, showroom bookings counted
   assert.ok(Array.isArray(after.showrooms));
 });
 
+test("appearance theme: curated keys only, blank restores the default", async () => {
+  assert.equal((await api("/api/content")).data.theme, "heritage");
+
+  const set = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "champagne" }),
+  });
+  assert.equal(set.status, 200);
+  assert.equal((await api("/api/content")).data.theme, "champagne");
+
+  const junk = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "neon-disco" }),
+  });
+  assert.equal(junk.status, 400);
+  assert.match(junk.data.error, /heritage, pearl, champagne, sage, blush/);
+
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ theme: "" }),
+  });
+  assert.equal((await api("/api/content")).data.theme, "heritage");
+});
+
 test("admin can upload media from disk; it serves publicly and sets the hero", async () => {
   const bytes = Buffer.from("fake-mp4-bytes-for-upload-test");
   const up = await fetch(`${BASE}/api/admin/uploads?name=${encodeURIComponent("Hero Clip.MP4")}`, {
