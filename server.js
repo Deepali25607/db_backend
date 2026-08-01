@@ -265,7 +265,7 @@ function buildOrderDraft(body, req) {
   const method = fulfilment?.method === "pickup" ? "pickup" : "ship";
   let pickupStore = null;
   if (method === "pickup") {
-    pickupStore = STORES.find((s) => s.key === fulfilment?.store);
+    pickupStore = db.stores.find((s) => s.key === fulfilment?.store);
     if (!pickupStore) throw httpError(400, "Choose a showroom for pickup.");
   } else if (!customer.address) {
     throw httpError(400, "Delivery address is required for shipping.");
@@ -3445,20 +3445,62 @@ app.post("/api/products/:slug/reviews", (req, res) => {
 // ---------------------------------------------------- appointments
 // BRD FR-CMS-09 / FR-PDP-10 — book a showroom visit, optionally against
 // a specific piece, which the store keeps ready at the counter.
-const STORES = [
+const DEFAULT_STORES = [
   { key: "indore-palasia", name: "Indore — Palasia", address: "12 Palasia Square, A.B. Road, Indore 452001", hours: "10:30 am – 8:30 pm", phone: "+91 731 400 1122" },
   { key: "bhopal-mp-nagar", name: "Bhopal — MP Nagar", address: "Plot 45, Zone-I, MP Nagar, Bhopal 462011", hours: "11:00 am – 8:00 pm", phone: "+91 755 466 8890" },
   { key: "ujjain-freeganj", name: "Ujjain — Freeganj", address: "78 Freeganj Tower Road, Ujjain 456010", hours: "10:30 am – 8:00 pm", phone: "+91 734 255 6677" },
 ];
+// Branches live in the store (Admin → Settings → Showrooms); the constant
+// above only seeds a fresh database and answers "restore standard branches".
+if (!Array.isArray(db.stores) || db.stores.length === 0)
+  db.stores = structuredClone(DEFAULT_STORES);
 const APPOINTMENT_SLOTS = ["11:00 am", "12:30 pm", "2:00 pm", "4:00 pm", "5:30 pm", "7:00 pm"];
 
 if (!Array.isArray(db.appointments)) db.appointments = [];
 
-app.get("/api/stores", (req, res) => res.json({ stores: STORES, slots: APPOINTMENT_SLOTS }));
+app.get("/api/stores", (req, res) => res.json({ stores: db.stores, slots: APPOINTMENT_SLOTS }));
+
+// Replace the whole branch list at once (same wholesale pattern as the
+// header/footer links). Appointments and pickup orders keep the branch
+// name they were created with, so edits never rewrite history.
+app.patch("/api/admin/stores", requireAdmin, (req, res) => {
+  const raw = req.body?.stores;
+  if (!Array.isArray(raw))
+    return res.status(400).json({ error: "Send stores as a list." });
+  if (raw.length === 0) {
+    db.stores = structuredClone(DEFAULT_STORES);
+    audit("stores", "restored the standard branches");
+    save();
+    return res.json({ ok: true, stores: db.stores });
+  }
+  if (raw.length > 8)
+    return res.status(400).json({ error: "Keep it to 8 branches or fewer." });
+  const clean = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    const name = String(entry?.name || "").trim().slice(0, 60);
+    const address = String(entry?.address || "").trim().slice(0, 140);
+    const hours = String(entry?.hours || "").trim().slice(0, 40);
+    const phone = String(entry?.phone || "").trim().slice(0, 20);
+    if (!name || !address)
+      return res.status(400).json({ error: "Every branch needs a name and an address." });
+    if (phone && !/^\+?[\d\s\-()]{8,20}$/.test(phone))
+      return res.status(400).json({ error: `"${phone}" doesn't look like a phone number.` });
+    let key =
+      name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "branch";
+    while (seen.has(key)) key += "-2";
+    seen.add(key);
+    clean.push({ key, name, address, hours, phone });
+  }
+  db.stores = clean;
+  audit("stores", `${clean.length} branch${clean.length === 1 ? "" : "es"}: ${clean.map((s) => s.name).join(", ")}`);
+  save();
+  res.json({ ok: true, stores: db.stores });
+});
 
 app.post("/api/appointments", (req, res) => {
   const { store, date, slot, name, phone, productSlug, notes } = req.body || {};
-  if (!STORES.some((s) => s.key === store))
+  if (!db.stores.some((s) => s.key === store))
     return res.status(400).json({ error: "Choose a showroom." });
   if (!APPOINTMENT_SLOTS.includes(slot))
     return res.status(400).json({ error: "Choose a time slot." });
@@ -3475,7 +3517,7 @@ app.post("/api/appointments", (req, res) => {
   const appointment = {
     id: newId("APT"),
     store,
-    storeName: STORES.find((s) => s.key === store).name,
+    storeName: db.stores.find((s) => s.key === store).name,
     date,
     slot,
     name,

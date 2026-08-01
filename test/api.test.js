@@ -1370,3 +1370,55 @@ test("header & footer are admin-editable; empty lists restore defaults", async (
   assert.equal(plain.headerBgImage, "");
   assert.equal(plain.footerBgImage, "");
 });
+
+test("showrooms: admin-managed branches drive stores, appointments and pickup", async () => {
+  const initial = (await api("/api/stores")).data;
+  assert.equal(initial.stores.length, 3);
+  assert.equal(initial.stores[0].key, "indore-palasia");
+
+  // replace the list with two custom branches (keys derive from names)
+  const set = await api("/api/admin/stores", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ stores: [
+      { name: "Dewas - Station Road", address: "3 Station Road, Dewas 455001", hours: "10:00 am - 8:00 pm", phone: "+91 727 224 4556" },
+      { name: "Ratlam - Do Batti", address: "9 Do Batti Chowk, Ratlam 457001", hours: "", phone: "" },
+    ] }),
+  });
+  assert.equal(set.status, 200);
+  assert.equal(set.data.stores.length, 2);
+  assert.equal(set.data.stores[0].key, "dewas-station-road");
+
+  const live = (await api("/api/stores")).data.stores;
+  assert.equal(live.length, 2);
+
+  // appointments accept the new branch and reject the removed one
+  const when = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+  const booked = await api("/api/appointments", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ store: "ratlam-do-batti", date: when, slot: "2:00 pm", name: "Branch Test", phone: "9800000031" }),
+  });
+  assert.equal(booked.status, 201);
+  assert.equal(booked.data.storeName, "Ratlam - Do Batti");
+  const gone = await api("/api/appointments", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ store: "indore-palasia", date: when, slot: "2:00 pm", name: "Branch Test", phone: "9800000031" }),
+  });
+  assert.equal(gone.status, 400);
+
+  // validation: a branch without an address is refused, list unchanged
+  const bad = await api("/api/admin/stores", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ stores: [{ name: "Nameless", address: "" }] }),
+  });
+  assert.equal(bad.status, 400);
+  assert.equal((await api("/api/stores")).data.stores.length, 2);
+
+  // empty list restores the standard branches
+  const restore = await api("/api/admin/stores", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ stores: [] }),
+  });
+  assert.equal(restore.status, 200);
+  const back = (await api("/api/stores")).data.stores;
+  assert.equal(back.length, 3);
+  assert.equal(back[2].key, "ujjain-freeganj");
+});
