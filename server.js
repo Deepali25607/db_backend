@@ -492,6 +492,49 @@ function buildOrderDraft(body, req) {
   };
 }
 
+// Placing an order quietly creates (or enriches) the customer's account —
+// the phone number is the identity here, so a later OTP sign-in lands in
+// the same account with the order history and delivery address waiting.
+function upsertCustomerFromOrder(orderCustomer) {
+  const phone = orderCustomer.phone;
+  let account = customerByPhone(phone);
+  let created = false;
+  if (!account) {
+    account = {
+      phone,
+      name: orderCustomer.name || null,
+      email: orderCustomer.email || null,
+      dob: null,
+      anniversary: null,
+      ringSize: null,
+      addresses: [],
+      createdAt: new Date().toISOString(),
+    };
+    db.customers.push(account);
+    created = true;
+  } else {
+    if (!account.name && orderCustomer.name) account.name = orderCustomer.name;
+    if (!account.email && orderCustomer.email) account.email = orderCustomer.email;
+  }
+  // keep the delivery address on file (pickup pseudo-addresses excluded)
+  const line = String(orderCustomer.address || "");
+  const pincode = String(orderCustomer.pincode || "");
+  if (line && !line.startsWith("Store pickup") && /^[1-9]\d{5}$/.test(pincode)) {
+    const dup = account.addresses.some((a) => a.line === line && a.pincode === pincode);
+    if (!dup && account.addresses.length < 8) {
+      account.addresses.push({
+        id: crypto.randomBytes(4).toString("hex"),
+        label: account.addresses.length === 0 ? "Home" : "Delivery",
+        line,
+        pincode,
+        city: null,
+        isDefault: account.addresses.length === 0,
+      });
+    }
+  }
+  return created;
+}
+
 function createOrder(draft, paymentStatus, intentId = null) {
   const now = new Date().toISOString();
   let status = paymentStatus === "paid" ? "Confirmed" : "Placed";
@@ -527,6 +570,7 @@ function createOrder(draft, paymentStatus, intentId = null) {
   };
   if (db.abandoned) delete db.abandoned[draft.customer.phone];
   db.orders.push(order);
+  const accountCreated = upsertCustomerFromOrder(order.customer);
   adjustStock(order.lines, -1);
   if (draft.redeemed) {
     const acc = loyaltyAccount(order.customer.phone);
@@ -558,6 +602,13 @@ function createOrder(draft, paymentStatus, intentId = null) {
       : `Thank you! Order ${order.orderId} of ₹${order.payable.toLocaleString("en-IN")} is ${status.toLowerCase()}. Track it anytime at dpjewellers.example/track.`,
     ["sms", "whatsapp", "email"]
   );
+  if (accountCreated)
+    notify(
+      order.customer.phone,
+      "account",
+      `Your DP Jewellers account is ready — sign in with this mobile number on the Account page to see your orders, returns and rewards, no password needed.`,
+      ["sms"]
+    );
   if (invoiceEligible(order)) ensureInvoice(order);
   save();
   return order;
@@ -1041,7 +1092,7 @@ app.get("/api/track", (req, res) => {
     discount: order.discount || 0,
     coupon: order.coupon || null,
     payment: { mode: order.payment.mode, status: order.payment.status },
-    lines: order.lines.map(({ name, qty, size, image, slug }) => ({ name, qty, size, image, slug })),
+    lines: order.lines.map(({ name, qty, size, image, slug, unitPrice, lineTotal }) => ({ name, qty, size, image, slug, unitPrice, lineTotal })),
     returns: db.returns
       .filter((r) => r.orderId === order.orderId)
       .map(({ id, slug, size, itemName, type, status, refundAmount }) => ({ id, slug, size, itemName, type, status, refundAmount })),

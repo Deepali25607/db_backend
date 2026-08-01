@@ -737,15 +737,18 @@ test("customer profiles: admin list and per-phone detail across guests too", asy
   // the suite's test buyer (9800000001) has placed orders without an account
   const rows = (await api("/api/admin/customers", { headers: ADMIN })).data;
   const buyer = rows.find((r) => r.phone === "9800000001");
-  assert.ok(buyer, "guest buyer appears in the customer list");
-  assert.equal(buyer.registered, false);
+  assert.ok(buyer, "buyer appears in the customer list");
+  // ordering auto-creates the account, so an order-only phone is registered
+  assert.equal(buyer.registered, true);
   assert.ok(buyer.orders >= 1);
   assert.ok(buyer.spend > 0);
   assert.equal(buyer.name, "Test Buyer");
 
   const detail = (await api("/api/admin/customers/9800000001", { headers: ADMIN })).data;
   assert.equal(detail.name, "Test Buyer");
-  assert.equal(detail.account, null);
+  // auto-created at first order, delivery address already on file
+  assert.ok(detail.account);
+  assert.ok(detail.account.addresses.length >= 1);
   assert.equal(detail.stats.orders, buyer.orders);
   assert.ok(detail.orders.length >= 1);
   assert.ok(detail.orders[0].orderId.startsWith("DPJ"));
@@ -1639,4 +1642,52 @@ test("discount rules engine: conditions, priority, making target, audiences", as
   });
   assert.equal(cleared.status, 200);
   assert.equal((await api("/api/products/aurelia-solitaire-ring")).data.product.price.discountPct, 0);
+});
+
+test("placing an order auto-creates the customer account, address on file", async () => {
+  const phone = "9800000071";
+  assert.equal((await api(`/api/admin/customers/${phone}`, { headers: ADMIN })).status, 404);
+
+  const placed = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
+      customer: { name: "Auto Account", phone, address: "42 Auto Lane, Indore", pincode: "452001", email: "auto@test.in" },
+    }),
+  });
+  assert.equal(placed.status, 201);
+
+  const profile = (await api(`/api/admin/customers/${phone}`, { headers: ADMIN })).data;
+  assert.ok(profile.account, "account was auto-created");
+  assert.equal(profile.account.email, "auto@test.in");
+  assert.equal(profile.account.addresses.length, 1);
+  assert.equal(profile.account.addresses[0].line, "42 Auto Lane, Indore");
+  assert.equal(profile.account.addresses[0].isDefault, true);
+
+  // same address never duplicates; a different one is kept as well
+  await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
+      customer: { name: "Auto Account", phone, address: "42 Auto Lane, Indore", pincode: "452001" },
+    }),
+  });
+  await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
+      customer: { name: "Auto Account", phone, address: "7 Second Street, Bhopal", pincode: "462011" },
+    }),
+  });
+  const p2 = (await api(`/api/admin/customers/${phone}`, { headers: ADMIN })).data;
+  assert.equal(p2.account.addresses.length, 2);
+
+  // OTP sign-in lands in the SAME auto-created account
+  const otp = (await api("/api/auth/otp", { method: "POST", headers: JSONH, body: JSON.stringify({ phone }) })).data.demoOtp;
+  const verified = (await api("/api/auth/verify", { method: "POST", headers: JSONH, body: JSON.stringify({ phone, otp }) })).data;
+  assert.equal(verified.customer.name, "Auto Account");
+  assert.equal(verified.customer.addresses.length, 2);
+
+  // tracking is product-wise: each line carries its slug and money fields
+  const track = (await api(`/api/track?orderId=${placed.data.orderId}&phone=${phone}`)).data;
+  assert.equal(track.lines[0].slug, "aurelia-solitaire-ring");
+  assert.ok(track.lines[0].unitPrice > 0);
+  assert.ok(track.lines[0].lineTotal > 0);
 });
