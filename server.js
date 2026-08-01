@@ -1523,6 +1523,10 @@ const DEFAULT_CONTENT = {
   // homepage promotion slides: [{ image, slug }] — each image may link to a
   // product; the hero rotates through them (the video, when set, wins)
   heroSlides: [],
+  // category-wise sale banners: [{ image, category, alt, on, hMobile, hDesktop }]
+  // — a marquee under the hero; tapping opens that category in the shop.
+  // category "" (or an unknown key) falls back to the full collection.
+  promoBanners: [],
   companyName: "DP Jewellers",
   companyTagline: "Fine Jewellery",
   heroEyebrow: "Est. 1962 · BIS Hallmarked",
@@ -1739,6 +1743,33 @@ app.patch("/api/admin/content", requireAdmin, (req, res) => {
       }
       if (JSON.stringify(db.content.heroSlides || []) !== JSON.stringify(slides))
         changes.push({ key, to: slides, label: `${slides.length} slide${slides.length === 1 ? "" : "s"}` });
+      continue;
+    }
+    // category-wise sale banners (Settings → Category promotions)
+    if (key === "promoBanners") {
+      if (!Array.isArray(raw))
+        return res.status(400).json({ error: "promoBanners must be a list of banners." });
+      if (raw.length > 6)
+        return res.status(400).json({ error: "Up to 6 promotion banners." });
+      const banners = [];
+      for (const b of raw) {
+        const image = String(b?.image || "").trim();
+        const category = String(b?.category || "").trim().toLowerCase().slice(0, 30);
+        const alt = String(b?.alt || "").trim().slice(0, 80);
+        const hMobile = Math.round(Number(b?.hMobile) || 0);
+        const hDesktop = Math.round(Number(b?.hDesktop) || 0);
+        if (!/^(https?:\/\/|\/)[^\s"']+$/i.test(image) || image.length > 600)
+          return res.status(400).json({
+            error: "Each banner needs an image (https://… or a /path on this site).",
+          });
+        if ((hMobile && (hMobile < 40 || hMobile > 600)) || (hDesktop && (hDesktop < 40 || hDesktop > 600)))
+          return res.status(400).json({ error: "Banner heights must be 40–600 px (blank for auto)." });
+        banners.push({ image, category, alt, on: b?.on === false ? false : true, hMobile, hDesktop });
+      }
+      if (JSON.stringify(db.content.promoBanners || []) !== JSON.stringify(banners)) {
+        const live = banners.filter((b) => b.on).length;
+        changes.push({ key, to: banners, label: `${live} of ${banners.length} banner${banners.length === 1 ? "" : "s"} live` });
+      }
       continue;
     }
     const value = String(raw || "").trim();

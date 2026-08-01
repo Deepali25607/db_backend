@@ -1691,3 +1691,37 @@ test("placing an order auto-creates the customer account, address on file", asyn
   assert.ok(track.lines[0].unitPrice > 0);
   assert.ok(track.lines[0].lineTotal > 0);
 });
+
+test("category promotion banners: validated, ordered, blank list hides the marquee", async () => {
+  assert.deepEqual((await api("/api/content")).data.promoBanners, []);
+
+  const set = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ promoBanners: [
+      { image: "/api/uploads/diwali-rings.jpg", category: "rings", alt: "Diwali sale on rings", hMobile: 120, hDesktop: 220 },
+      { image: "/api/uploads/silver-fest.jpg", category: "old-sarees", on: false },
+    ] }),
+  });
+  assert.equal(set.status, 200);
+  const live = (await api("/api/content")).data.promoBanners;
+  assert.equal(live.length, 2);
+  assert.equal(live[0].category, "rings");
+  assert.equal(live[0].hDesktop, 220);
+  assert.equal(live[1].on, false);
+
+  const badImg = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ promoBanners: [{ image: "not a url", category: "rings" }] }),
+  });
+  assert.equal(badImg.status, 400);
+  const badHeight = await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ promoBanners: [{ image: "/api/uploads/x.jpg", hDesktop: 2000 }] }),
+  });
+  assert.equal(badHeight.status, 400);
+
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ promoBanners: [] }),
+  });
+  assert.deepEqual((await api("/api/content")).data.promoBanners, []);
+});
