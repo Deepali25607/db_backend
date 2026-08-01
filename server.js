@@ -1073,6 +1073,28 @@ app.post("/api/orders", (req, res) => {
   }
 });
 
+// Phone-first tracking: every order under a mobile number, product-wise —
+// no order id to remember. Same lookup key the schemes/appointments
+// "my" endpoints already use.
+app.get("/api/track/my", (req, res) => {
+  const phone = String(req.query.phone || "").trim();
+  if (!/^[6-9]\d{9}$/.test(phone))
+    return res.status(400).json({ error: "Enter the 10-digit mobile used at checkout." });
+  const orders = db.orders
+    .filter((o) => o.customer.phone === phone)
+    .map((o) => ({
+      orderId: o.orderId,
+      placedAt: o.placedAt,
+      status: o.status,
+      total: o.payable ?? o.total,
+      lines: o.lines.map(({ name, qty, size, image, slug, lineTotal }) => ({ name, qty, size, image, slug, lineTotal })),
+      cancellable: canTransition(o.status, "Cancelled"),
+      invoiceAvailable: invoiceEligible(o),
+    }))
+    .reverse();
+  res.json({ orders });
+});
+
 // Customer order tracking — order id + phone (no login required).
 app.get("/api/track", (req, res) => {
   const { orderId, phone } = req.query;
@@ -2992,7 +3014,7 @@ app.get("/api/me", (req, res) => {
 app.patch("/api/me", (req, res) => {
   const customer = authedCustomer(req);
   if (!customer) return res.status(401).json({ error: "Please sign in." });
-  for (const key of ["name", "email", "dob", "anniversary", "ringSize"]) {
+  for (const key of ["name", "email", "dob", "anniversary", "ringSize", "gender"]) {
     if (key in (req.body || {})) customer[key] = req.body[key] || null;
   }
   save();

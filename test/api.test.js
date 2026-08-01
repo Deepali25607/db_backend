@@ -1725,3 +1725,26 @@ test("category promotion banners: validated, ordered, blank list hides the marqu
   });
   assert.deepEqual((await api("/api/content")).data.promoBanners, []);
 });
+
+test("phone-first tracking lists every order product-wise, no order id needed", async () => {
+  assert.equal((await api("/api/track/my?phone=12345")).status, 400);
+  const empty = (await api("/api/track/my?phone=9899999997")).data;
+  assert.deepEqual(empty.orders, []);
+  const mine = (await api("/api/track/my?phone=9800000001")).data.orders;
+  assert.ok(mine.length >= 1);
+  const o = mine[0];
+  assert.ok(o.orderId.startsWith("DPJ"));
+  assert.ok(o.lines.length >= 1 && o.lines[0].slug && o.lines[0].image);
+  assert.ok(typeof o.lines[0].lineTotal === "number");
+  assert.ok(typeof o.cancellable === "boolean");
+  assert.ok(o.total > 0 && o.status);
+  // gender is now an editable profile field
+  const otp = (await api("/api/auth/otp", { method: "POST", headers: JSONH, body: JSON.stringify({ phone: "9800000001" }) })).data.demoOtp;
+  const { token } = (await api("/api/auth/verify", { method: "POST", headers: JSONH, body: JSON.stringify({ phone: "9800000001", otp }) })).data;
+  const upd = await api("/api/me", {
+    method: "PATCH", headers: { "x-auth-token": token, "content-type": "application/json" },
+    body: JSON.stringify({ gender: "Female" }),
+  });
+  assert.equal(upd.status, 200);
+  assert.equal(upd.data.gender, "Female");
+});
