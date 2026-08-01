@@ -172,8 +172,62 @@ function effectiveDiscountPct(product) {
   );
 }
 
-function priceOf(product) {
-  return computePrice(product, db.rates, undefined, effectiveDiscountPct(product));
+/* Discount rules engine (Admin → Settings → Discounts). Each rule targets
+   the whole price or the making charges only, gated by product conditions
+   (metal / purity / category / collection / occasion / minimum value),
+   an audience (everyone, gold-scheme holders, first-time or returning
+   customers — resolved at billing when the phone is known), a validity
+   window, and a priority. Per-piece and site-wide markdowns compete in the
+   same contest at priority 0, so a piece is still never discounted twice:
+   highest priority wins, then the largest rupee saving. */
+if (!Array.isArray(db.discountRules)) db.discountRules = [];
+
+function discountRuleActive(rule, now) {
+  if (!rule.on) return false;
+  if (rule.startsAt && now < Date.parse(`${rule.startsAt}T00:00:00`)) return false;
+  if (rule.endsAt && now > Date.parse(`${rule.endsAt}T23:59:59`)) return false;
+  return true;
+}
+
+// ctx is null for anonymous browsing; { hasScheme, orderCount } at billing
+function discountRuleMatches(rule, product, bare, ctx) {
+  if (rule.audience === "scheme" && !ctx?.hasScheme) return false;
+  if (rule.audience === "first" && !(ctx && ctx.orderCount === 0)) return false;
+  if (rule.audience === "returning" && !(ctx && ctx.orderCount > 0)) return false;
+  if (rule.metal && product.metal.type !== rule.metal) return false;
+  if (rule.purity && product.metal.purity !== rule.purity) return false;
+  if (rule.category && product.category !== rule.category) return false;
+  if (rule.collection && (product.collection || "").toLowerCase() !== rule.collection.toLowerCase()) return false;
+  if (rule.occasion && !(product.occasion || []).includes(rule.occasion)) return false;
+  if (rule.minTotal > 0 && bare.subtotal < rule.minTotal) return false;
+  return true;
+}
+
+function winningDiscount(product, ctx = null) {
+  const bare = computePrice(product, db.rates, undefined, 0);
+  const candidates = [];
+  const basePct = effectiveDiscountPct(product);
+  if (basePct > 0)
+    candidates.push({
+      pct: basePct, base: "price", label: null, priority: 0,
+      value: (bare.subtotal * basePct) / 100,
+    });
+  const now = Date.now();
+  for (const rule of db.discountRules) {
+    if (!discountRuleActive(rule, now)) continue;
+    if (!discountRuleMatches(rule, product, bare, ctx)) continue;
+    const value = ((rule.target === "making" ? bare.makingCharges : bare.subtotal) * rule.pct) / 100;
+    if (value <= 0) continue;
+    candidates.push({ pct: rule.pct, base: rule.target === "making" ? "making" : "price", label: rule.name, priority: rule.priority || 0, value });
+  }
+  if (candidates.length === 0) return 0;
+  candidates.sort((a, b) => b.priority - a.priority || b.value - a.value);
+  const win = candidates[0];
+  return { pct: win.pct, base: win.base, label: win.label };
+}
+
+function priceOf(product, ctx = null) {
+  return computePrice(product, db.rates, undefined, winningDiscount(product, ctx));
 }
 
 function priced(product) {
@@ -263,6 +317,14 @@ function buildOrderDraft(body, req) {
   if (!/^[6-9]\d{9}$/.test(String(customer.phone)))
     throw httpError(400, "Enter a valid 10-digit mobile number.");
 
+  // billing-time customer context — lets audience-gated discount rules
+  // (gold-scheme holders, first order, returning) apply at checkout
+  const billingPhone = String(customer.phone);
+  const billingCtx = {
+    hasScheme: db.schemes.some((s) => s.customer.phone === billingPhone && s.status === "active"),
+    orderCount: db.orders.filter((o) => o.customer.phone === billingPhone && o.status !== "Cancelled").length,
+  };
+
   // Fulfilment: insured shipping (default) or store pickup (FR-CHK-11)
   const method = fulfilment?.method === "pickup" ? "pickup" : "ship";
   let pickupStore = null;
@@ -309,7 +371,7 @@ function buildOrderDraft(body, req) {
         throw httpError(400, "Engraving may use letters, numbers, spaces and . & ' - only.");
     }
 
-    const price = priceOf(product);
+    const price = priceOf(product, billingCtx);
     lines.push({
       slug: product.slug,
       name: product.name,
@@ -651,6 +713,67 @@ app.patch("/api/admin/emi-plans", requireAdmin, (req, res) => {
   );
   save();
   res.json({ ok: true, plans: db.emiPlans });
+});
+
+// -------------------------------------------------- discount rules (admin)
+const RULE_TARGETS = ["price", "making"];
+const RULE_AUDIENCES = ["all", "scheme", "first", "returning"];
+const RULE_METALS = ["", "gold", "silver", "platinum"];
+
+app.get("/api/admin/discount-rules", requireAdmin, (req, res) =>
+  res.json({ rules: db.discountRules })
+);
+
+app.patch("/api/admin/discount-rules", requireAdmin, (req, res) => {
+  const raw = req.body?.rules;
+  if (!Array.isArray(raw))
+    return res.status(400).json({ error: "Send rules as a list." });
+  if (raw.length > 20)
+    return res.status(400).json({ error: "Keep it to 20 discount rules or fewer." });
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const clean = [];
+  for (const entry of raw) {
+    const name = String(entry?.name || "").trim().slice(0, 40);
+    const pct = Number(entry?.pct);
+    const target = RULE_TARGETS.includes(entry?.target) ? entry.target : "price";
+    const audience = RULE_AUDIENCES.includes(entry?.audience) ? entry.audience : "all";
+    const metal = String(entry?.metal || "").trim().toLowerCase();
+    const purity = String(entry?.purity || "").trim().toUpperCase().slice(0, 10);
+    const category = String(entry?.category || "").trim().toLowerCase().slice(0, 30);
+    const collection = String(entry?.collection || "").trim().slice(0, 40);
+    const occasion = String(entry?.occasion || "").trim().toLowerCase().slice(0, 30);
+    const minTotal = Math.max(0, Math.round(Number(entry?.minTotal) || 0));
+    const priority = Math.round(Number(entry?.priority) || 0);
+    const startsAt = String(entry?.startsAt || "").trim();
+    const endsAt = String(entry?.endsAt || "").trim();
+    if (!name)
+      return res.status(400).json({ error: "Every rule needs a name — it shows on the price break-up." });
+    if (!Number.isFinite(pct) || pct < 1 || pct > 75)
+      return res.status(400).json({ error: `Percent for "${name}" must be between 1 and 75.` });
+    if (!RULE_METALS.includes(metal))
+      return res.status(400).json({ error: `Metal for "${name}" must be gold, silver or platinum (or blank for any).` });
+    if (priority < 0 || priority > 100)
+      return res.status(400).json({ error: `Priority for "${name}" must be 0–100.` });
+    if ((startsAt && !DATE_RE.test(startsAt)) || (endsAt && !DATE_RE.test(endsAt)))
+      return res.status(400).json({ error: `Dates for "${name}" must be YYYY-MM-DD.` });
+    if (startsAt && endsAt && endsAt < startsAt)
+      return res.status(400).json({ error: `"${name}" ends before it starts.` });
+    clean.push({
+      name, on: entry?.on === false ? false : true,
+      pct: Math.round(pct * 10) / 10, target, audience,
+      metal, purity, category, collection, occasion,
+      minTotal, priority, startsAt, endsAt,
+    });
+  }
+  db.discountRules = clean;
+  audit(
+    "discounts",
+    clean.length
+      ? `${clean.length} rule${clean.length === 1 ? "" : "s"}: ${clean.map((r) => `${r.name} ${r.pct}% ${r.target}${r.on ? "" : " (off)"}`).join("; ")}`
+      : "all discount rules removed"
+  );
+  save();
+  res.json({ ok: true, rules: db.discountRules });
 });
 
 app.get("/api/rates", (req, res) =>

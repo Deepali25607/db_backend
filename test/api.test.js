@@ -1543,3 +1543,100 @@ test("gold scheme plans: admin-managed, keys stable, referenced plans protected"
   });
   assert.equal(settle.status, 200);
 });
+
+test("discount rules engine: conditions, priority, making target, audiences", async () => {
+  await api("/api/admin/config", { method: "PATCH", headers: ADMIN, body: JSON.stringify({ siteDiscountOn: 0 }) });
+  const bare = (await api("/api/products/aurelia-solitaire-ring")).data.product.price;
+  assert.equal(bare.discountPct, 0);
+
+  // 1) making-charge rule, gold only — reduces making, leaves jewellery GST full
+  const setOne = await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ rules: [
+      { name: "Festival making offer", pct: 50, target: "making", metal: "gold" },
+    ] }),
+  });
+  assert.equal(setOne.status, 200);
+  const making = (await api("/api/products/aurelia-solitaire-ring")).data.product.price;
+  assert.equal(making.discountBase, "making");
+  assert.equal(making.discountLabel, "Festival making offer");
+  assert.equal(making.discountValue, Math.round(bare.makingCharges * 0.5));
+  assert.equal(making.taxable, bare.subtotal - making.discountValue);
+  assert.equal(making.gstDetail.onJewellery, bare.gstDetail.onJewellery);
+  assert.equal(making.gstDetail.onMaking, Math.round(bare.gstDetail.onMaking / 2));
+
+  // 2) a higher-priority whole-price rule wins even at a smaller saving
+  await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ rules: [
+      { name: "Festival making offer", pct: 50, target: "making", metal: "gold" },
+      { name: "Golden hour", pct: 5, target: "price", priority: 10 },
+    ] }),
+  });
+  const prio = (await api("/api/products/aurelia-solitaire-ring")).data.product.price;
+  assert.equal(prio.discountLabel, "Golden hour");
+  assert.equal(prio.discountPct, 5);
+
+  // 3) purity + date-window conditions exclude
+  await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ rules: [
+      { name: "22K only", pct: 10, purity: "22K" },
+      { name: "Ended sale", pct: 20, endsAt: "2020-01-01" },
+    ] }),
+  });
+  const excluded = (await api("/api/products/aurelia-solitaire-ring")).data.product.price;
+  assert.equal(excluded.discountPct, 0); // aurelia is 18K; the 20% sale is over
+  const meera = (await api("/api/products/meera-classic-band")).data.product.price;
+  assert.equal(meera.discountLabel, "22K only"); // meera is 22K
+
+  // 4) audience rules: anonymous browsing untouched, billing applies them
+  await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ rules: [
+      { name: "Scheme circle", pct: 12, audience: "scheme" },
+    ] }),
+  });
+  assert.equal((await api("/api/products/aurelia-solitaire-ring")).data.product.price.discountPct, 0);
+
+  const schemePhone = "9800000061";
+  const enrolled = await api("/api/schemes/enroll", {
+    method: "POST", headers: JSONH,
+    body: JSON.stringify({ variant: "flexi-24", monthlyAmount: 1500, acceptTerms: true, customer: { name: "Scheme Buyer", phone: schemePhone } }),
+  });
+  assert.equal(enrolled.status, 201);
+  const schemeOrder = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
+      customer: { name: "Scheme Buyer", phone: schemePhone, address: "9 Scheme Lane, Indore", pincode: "452001" },
+    }),
+  });
+  assert.equal(schemeOrder.status, 201);
+  const allOrders = (await api("/api/admin/orders", { headers: ADMIN })).data.orders;
+  const line = allOrders.find((o) => o.orderId === schemeOrder.data.orderId).lines[0];
+  assert.equal(line.unitBreak.taxable, bare.subtotal - Math.round(bare.subtotal * 0.12));
+
+  // a first-time stranger gets no scheme discount at billing
+  const plainOrder = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
+      customer: { name: "Plain Buyer", phone: "9800000062", address: "9 Plain Lane, Indore", pincode: "452001" },
+    }),
+  });
+  assert.equal(plainOrder.status, 201);
+  const plainLine = (await api("/api/admin/orders", { headers: ADMIN })).data.orders
+    .find((o) => o.orderId === plainOrder.data.orderId).lines[0];
+  assert.equal(plainLine.unitBreak.taxable, bare.subtotal);
+
+  // validation + cleanup
+  const bad = await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ rules: [{ name: "Too deep", pct: 90 }] }),
+  });
+  assert.equal(bad.status, 400);
+  const cleared = await api("/api/admin/discount-rules", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ rules: [] }),
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal((await api("/api/products/aurelia-solitaire-ring")).data.product.price.discountPct, 0);
+});

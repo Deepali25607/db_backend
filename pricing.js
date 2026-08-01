@@ -18,7 +18,11 @@ function round(n) {
   return Math.round(n);
 }
 
-function computePrice(product, rates, tax = DEFAULT_TAX, discountPct = 0) {
+// discount may be a plain percentage (comes off the whole pre-tax subtotal,
+// the historical behaviour) or a spec { pct, base: "price"|"making", label }.
+// A "making" discount reduces only the making-charge component, so GST on
+// jewellery value stays full while GST on making follows the reduced base.
+function computePrice(product, rates, tax = DEFAULT_TAX, discount = 0) {
   const { metal, stones = [], making, otherCharges = {} } = product;
 
   const rate = metalRate(rates, metal.type, metal.purity);
@@ -50,20 +54,45 @@ function computePrice(product, rates, tax = DEFAULT_TAX, discountPct = 0) {
 
   const otherValue = Object.values(otherCharges).reduce((a, b) => a + b, 0);
 
-  // markdown scales every pre-tax component; GST is charged on what is
-  // actually paid, so the discounted base feeds both GST buckets
-  const pct = Math.min(90, Math.max(0, Number(discountPct) || 0));
-  const factor = 1 - pct / 100;
+  const spec =
+    discount !== null && typeof discount === "object"
+      ? {
+          pct: Math.min(90, Math.max(0, Number(discount.pct) || 0)),
+          base: discount.base === "making" ? "making" : "price",
+          label: discount.label || null,
+        }
+      : { pct: Math.min(90, Math.max(0, Number(discount) || 0)), base: "price", label: null };
 
-  const gstOnJewellery =
-    ((metalValue + stoneValue + otherValue) * factor * tax.jewelleryGstPct) / 100;
-  const gstOnMaking = (makingCharges * factor * tax.makingGstPct) / 100;
+  const jewelleryValue = metalValue + stoneValue + otherValue;
+  const subtotal = jewelleryValue + makingCharges;
 
-  const subtotal = metalValue + stoneValue + makingCharges + otherValue;
-  const discountValue = subtotal * (pct / 100);
+  // GST is charged on the actual consideration per component
+  let discountValue, jewelleryBase, makingBase;
+  if (spec.base === "making") {
+    discountValue = makingCharges * (spec.pct / 100);
+    jewelleryBase = jewelleryValue;
+    makingBase = makingCharges - discountValue;
+  } else {
+    const factor = 1 - spec.pct / 100;
+    discountValue = subtotal * (spec.pct / 100);
+    jewelleryBase = jewelleryValue * factor;
+    makingBase = makingCharges * factor;
+  }
+
+  const gstOnJewellery = (jewelleryBase * tax.jewelleryGstPct) / 100;
+  const gstOnMaking = (makingBase * tax.makingGstPct) / 100;
+
   const taxable = subtotal - discountValue;
   const gst = gstOnJewellery + gstOnMaking;
-  const gstFull = gst / factor; // GST as it would be with no markdown (for the MRP)
+  // GST as it would be with no markdown at all (for the struck MRP)
+  const gstFull =
+    (jewelleryValue * tax.jewelleryGstPct + makingCharges * tax.makingGstPct) / 100;
+
+  // effective percentage of the whole pre-tax value, for badges and flags
+  const displayPct =
+    spec.base === "making"
+      ? Math.round(((discountValue / (subtotal || 1)) * 100) * 10) / 10
+      : spec.pct;
 
   return {
     metalRatePerGram: rate,
@@ -72,7 +101,9 @@ function computePrice(product, rates, tax = DEFAULT_TAX, discountPct = 0) {
     makingCharges: round(makingCharges),
     otherCharges: round(otherValue),
     subtotal: round(subtotal),
-    discountPct: pct,
+    discountPct: displayPct,
+    discountBase: spec.base,
+    discountLabel: spec.label,
     discountValue: round(discountValue),
     taxable: round(taxable),
     gst: round(gst),
