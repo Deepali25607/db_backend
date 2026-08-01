@@ -1473,3 +1473,73 @@ test("emi plans: bank-partner schemes are admin-managed, empty = simple line", a
   assert.equal(clear.status, 200);
   assert.deepEqual((await api("/api/config")).data.emiPlans, []);
 });
+
+test("gold scheme plans: admin-managed, keys stable, referenced plans protected", async () => {
+  const initial = (await api("/api/schemes")).data;
+  assert.equal(initial.length, 2);
+  assert.equal(initial[0].key, "swarna-11-1");
+
+  // add a third plan and rename an existing one (key must survive the rename)
+  const withNew = await api("/api/admin/scheme-variants", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ variants: [
+      { key: "swarna-11-1", name: "Swarna Plus 11+1", tenureMonths: 11, minMonthly: 2000, bonus: "12th instalment on us", blurb: "Eleven pay, twelve accrue." },
+      { key: "flexi-24", name: "Flexi Gold 24", tenureMonths: 24, minMonthly: 1000, bonus: "Making charges waived up to 50% at redemption", blurb: "Two light years of gold." },
+      { name: "Akshaya 12", tenureMonths: 12, minMonthly: 3000, bonus: "5% bonus grams at redemption", blurb: "One festive year of savings." },
+    ] }),
+  });
+  assert.equal(withNew.status, 200);
+  assert.equal(withNew.data.variants.length, 3);
+  assert.equal(withNew.data.variants[0].key, "swarna-11-1");
+  assert.equal(withNew.data.variants[0].name, "Swarna Plus 11+1");
+  assert.equal(withNew.data.variants[2].key, "akshaya-12");
+
+  // a customer enrols on the new plan (min monthly enforced from the plan)
+  const tooLow = await api("/api/schemes/enroll", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ variant: "akshaya-12", monthlyAmount: 2000, acceptTerms: true, customer: { name: "Plan Test", phone: "9800000041" } }),
+  });
+  assert.equal(tooLow.status, 400);
+  const enrolled = await api("/api/schemes/enroll", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ variant: "akshaya-12", monthlyAmount: 3000, acceptTerms: true, customer: { name: "Plan Test", phone: "9800000041" } }),
+  });
+  assert.equal(enrolled.status, 201);
+  assert.equal(enrolled.data.variantName, "Akshaya 12");
+  assert.equal(enrolled.data.tenureMonths, 12);
+
+  // the referenced plan can no longer be removed - neither directly...
+  const dropIt = await api("/api/admin/scheme-variants", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ variants: [
+      { key: "swarna-11-1", name: "Swarna 11+1", tenureMonths: 11, minMonthly: 2000 },
+      { key: "flexi-24", name: "Flexi Gold 24", tenureMonths: 24, minMonthly: 1000 },
+    ] }),
+  });
+  assert.equal(dropIt.status, 400);
+  assert.match(dropIt.data.error, /akshaya-12/);
+  // ...nor via restore-to-standard while a scheme still references it
+  const restore = await api("/api/admin/scheme-variants", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ variants: [] }),
+  });
+  assert.equal(restore.status, 400);
+  assert.equal((await api("/api/schemes")).data.length, 3);
+
+  // validation: tenure out of range refused
+  const bad = await api("/api/admin/scheme-variants", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ variants: [{ name: "Century", tenureMonths: 90, minMonthly: 1000 }] }),
+  });
+  assert.equal(bad.status, 400);
+
+  // put the standard names back (keeping the referenced third plan)
+  const settle = await api("/api/admin/scheme-variants", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ variants: [
+      { key: "swarna-11-1", name: "Swarna 11+1", tenureMonths: 11, minMonthly: 2000, bonus: "12th instalment paid by DP Jewellers at redemption", blurb: "Pay 11 monthly instalments; the house adds the 12th. Redeem against any purchase." },
+      { key: "flexi-24", name: "Flexi Gold 24", tenureMonths: 24, minMonthly: 1000, bonus: "Making charges waived up to 50% at redemption", blurb: "A longer, lighter commitment that accrues grams every month for two years." },
+      { key: "akshaya-12", name: "Akshaya 12", tenureMonths: 12, minMonthly: 3000, bonus: "5% bonus grams at redemption", blurb: "One festive year of savings." },
+    ] }),
+  });
+  assert.equal(settle.status, 200);
+});

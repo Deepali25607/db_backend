@@ -1984,7 +1984,7 @@ app.post("/api/admin/rates/proposals/:id/:action", requireAdmin, (req, res) => {
 // customer accrues gold, not rupees. Terms acceptance is timestamped
 // (FR-GSS-09); PAN is captured when the committed value crosses the
 // statutory threshold (FR-GSS-02).
-const SCHEME_VARIANTS = [
+const DEFAULT_SCHEME_VARIANTS = [
   {
     key: "swarna-11-1",
     name: "Swarna 11+1",
@@ -2002,12 +2002,62 @@ const SCHEME_VARIANTS = [
     blurb: "A longer, lighter commitment that accrues grams every month for two years.",
   },
 ];
+// Scheme plans live in the store (Admin → Settings → Gold scheme plans).
+// Enrolled schemes reference their plan by key at read time, so the admin
+// endpoint below keeps keys stable and refuses to drop a referenced plan.
+if (!Array.isArray(db.schemeVariants) || db.schemeVariants.length === 0)
+  db.schemeVariants = structuredClone(DEFAULT_SCHEME_VARIANTS);
 
 if (!Array.isArray(db.schemes)) db.schemes = [];
 
+app.patch("/api/admin/scheme-variants", requireAdmin, (req, res) => {
+  const raw = req.body?.variants;
+  if (!Array.isArray(raw))
+    return res.status(400).json({ error: "Send variants as a list." });
+  let clean;
+  if (raw.length === 0) {
+    clean = structuredClone(DEFAULT_SCHEME_VARIANTS);
+  } else {
+    if (raw.length > 6)
+      return res.status(400).json({ error: "Keep it to 6 scheme plans or fewer." });
+    clean = [];
+    const seen = new Set();
+    for (const entry of raw) {
+      const name = String(entry?.name || "").trim().slice(0, 40);
+      const tenureMonths = Math.round(Number(entry?.tenureMonths));
+      const minMonthly = Math.round(Number(entry?.minMonthly));
+      const bonus = String(entry?.bonus || "").trim().slice(0, 120);
+      const blurb = String(entry?.blurb || "").trim().slice(0, 160);
+      if (!name)
+        return res.status(400).json({ error: "Every plan needs a name." });
+      if (!Number.isFinite(tenureMonths) || tenureMonths < 3 || tenureMonths > 60)
+        return res.status(400).json({ error: `Tenure for ${name} must be between 3 and 60 months.` });
+      if (!Number.isFinite(minMonthly) || minMonthly < 500 || minMonthly > 100000)
+        return res.status(400).json({ error: `Minimum instalment for ${name} must be ₹500 – ₹1,00,000.` });
+      let key = String(entry?.key || "").trim();
+      if (!key)
+        key = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "plan";
+      while (seen.has(key)) key += "-2";
+      seen.add(key);
+      clean.push({ key, name, tenureMonths, bonus, minMonthly, blurb });
+    }
+  }
+  // customers' running (or past) schemes must always find their plan
+  const keys = new Set(clean.map((v) => v.key));
+  const orphaned = [...new Set(db.schemes.filter((s) => !keys.has(s.variant)).map((s) => s.variant))];
+  if (orphaned.length > 0)
+    return res.status(400).json({
+      error: `Customers hold schemes on: ${orphaned.join(", ")} — those plans can be renamed but not removed.`,
+    });
+  db.schemeVariants = clean;
+  audit("schemes", `plans set: ${clean.map((v) => `${v.name} (${v.tenureMonths}mo)`).join(", ")}`);
+  save();
+  res.json({ ok: true, variants: db.schemeVariants });
+});
+
 function schemeView(s) {
   const rate22 = db.rates.gold["22K"];
-  const variant = SCHEME_VARIANTS.find((v) => v.key === s.variant);
+  const variant = db.schemeVariants.find((v) => v.key === s.variant);
   const paid = s.instalments.length;
   const totalPaid = s.instalments.reduce((a, i) => a + i.amount, 0);
   const grams = s.instalments.reduce((a, i) => a + i.grams, 0);
@@ -2036,11 +2086,11 @@ function schemeView(s) {
   };
 }
 
-app.get("/api/schemes", (req, res) => res.json(SCHEME_VARIANTS));
+app.get("/api/schemes", (req, res) => res.json(db.schemeVariants));
 
 app.post("/api/schemes/enroll", (req, res) => {
   const { variant, monthlyAmount, customer, acceptTerms } = req.body || {};
-  const v = SCHEME_VARIANTS.find((x) => x.key === variant);
+  const v = db.schemeVariants.find((x) => x.key === variant);
   if (!v) return res.status(400).json({ error: "Choose a scheme variant." });
   const amount = Number(monthlyAmount);
   if (!Number.isFinite(amount) || amount < v.minMonthly)
@@ -2096,7 +2146,7 @@ app.post("/api/schemes/:id/pay", (req, res) => {
   if (req.body?.outcome !== "success")
     return res.status(402).json({ error: "Payment failed at the gateway. No instalment was recorded — please retry." });
 
-  const variant = SCHEME_VARIANTS.find((v) => v.key === scheme.variant);
+  const variant = db.schemeVariants.find((v) => v.key === scheme.variant);
   const rate = db.rates.gold["22K"];
   scheme.instalments.push({
     no: scheme.instalments.length + 1,
