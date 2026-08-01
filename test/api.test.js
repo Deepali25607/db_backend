@@ -1422,3 +1422,54 @@ test("showrooms: admin-managed branches drive stores, appointments and pickup", 
   assert.equal(back.length, 3);
   assert.equal(back[2].key, "ujjain-freeganj");
 });
+
+test("emi plans: bank-partner schemes are admin-managed, empty = simple line", async () => {
+  const fresh = (await api("/api/config")).data;
+  assert.deepEqual(fresh.emiPlans, []);
+  assert.equal(fresh.pdpShowEmi, 1);
+
+  const set = await api("/api/admin/emi-plans", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ plans: [
+      { bank: "HDFC Bank", months: 12, ratePct: 0, minAmount: 0 },
+      { bank: "ICICI Bank", months: 18, ratePct: 13.5, minAmount: 50000 },
+    ] }),
+  });
+  assert.equal(set.status, 200);
+  assert.equal(set.data.plans.length, 2);
+  assert.equal(set.data.plans[1].ratePct, 13.5);
+
+  const live = (await api("/api/config")).data.emiPlans;
+  assert.equal(live.length, 2);
+  assert.equal(live[0].bank, "HDFC Bank");
+
+  // validation failures leave the list untouched
+  const noBank = await api("/api/admin/emi-plans", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ plans: [{ bank: "", months: 12 }] }),
+  });
+  assert.equal(noBank.status, 400);
+  const badTenure = await api("/api/admin/emi-plans", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ plans: [{ bank: "Axis", months: 48 }] }),
+  });
+  assert.equal(badTenure.status, 400);
+  assert.equal((await api("/api/config")).data.emiPlans.length, 2);
+
+  // the EMI line itself can be hidden via the pdp toggle
+  const hide = await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ pdpShowEmi: 0 }),
+  });
+  assert.equal(hide.status, 200);
+  assert.equal((await api("/api/config")).data.pdpShowEmi, 0);
+  await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ pdpShowEmi: 1 }),
+  });
+
+  // empty list clears back to the simple interest-free line
+  const clear = await api("/api/admin/emi-plans", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ plans: [] }),
+  });
+  assert.equal(clear.status, 200);
+  assert.deepEqual((await api("/api/config")).data.emiPlans, []);
+});

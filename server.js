@@ -67,6 +67,7 @@ const DEFAULT_CONFIG = {
   pdpShowWhatsapp: 1, // "Enquire on WhatsApp" (also needs the support WhatsApp number)
   pdpShowCallback: 1, // "Request a call back"
   pdpShowVisit: 1, // "Book a showroom visit for this piece"
+  pdpShowEmi: 1, // the "EMI from ₹X/month" line
   verificationThreshold: 150000, // orders at/above get a verification call hold (FR-OMS-03/04)
   lowStockThreshold: 3,
   storeName: "DP Jewellers",
@@ -94,6 +95,7 @@ const CONFIG_FIELDS = [
   { key: "pdpShowWhatsapp", label: "PDP: show WhatsApp enquiry (1/0)", min: 0, max: 1 },
   { key: "pdpShowCallback", label: "PDP: show call-back request (1/0)", min: 0, max: 1 },
   { key: "pdpShowVisit", label: "PDP: show showroom-visit link (1/0)", min: 0, max: 1 },
+  { key: "pdpShowEmi", label: "PDP: show the EMI line (1/0)", min: 0, max: 1 },
   { key: "verificationThreshold", label: "Verification hold from (₹)", min: 50000, max: 1000000 },
   { key: "lowStockThreshold", label: "Low-stock alert at (units)", min: 1, max: 20 },
 ];
@@ -610,7 +612,46 @@ function amountInWords(n) {
 app.get("/api/health", (req, res) =>
   res.json({ ok: true, storage: storage.backend, detail: storage.detail, providers: providers.status() })
 );
-app.get("/api/config", (req, res) => res.json(config));
+app.get("/api/config", (req, res) => res.json({ ...config, emiPlans: db.emiPlans }));
+
+// ------------------------------------------------- EMI bank-partner plans
+// Admin-managed financing schemes shown on the product page. With no plans
+// the PDP falls back to the simple interest-free line using emiMonths, so a
+// fresh store never advertises invented bank offers.
+if (!Array.isArray(db.emiPlans)) db.emiPlans = [];
+
+app.patch("/api/admin/emi-plans", requireAdmin, (req, res) => {
+  const raw = req.body?.plans;
+  if (!Array.isArray(raw))
+    return res.status(400).json({ error: "Send plans as a list." });
+  if (raw.length > 10)
+    return res.status(400).json({ error: "Keep it to 10 EMI plans or fewer." });
+  const clean = [];
+  for (const entry of raw) {
+    const bank = String(entry?.bank || "").trim().slice(0, 40);
+    const months = Math.round(Number(entry?.months));
+    const ratePct = Number(entry?.ratePct ?? 0);
+    const minAmount = Math.round(Number(entry?.minAmount ?? 0));
+    if (!bank)
+      return res.status(400).json({ error: "Every plan needs the bank or partner name." });
+    if (!Number.isFinite(months) || months < 3 || months > 36)
+      return res.status(400).json({ error: `Tenure for ${bank} must be between 3 and 36 months.` });
+    if (!Number.isFinite(ratePct) || ratePct < 0 || ratePct > 30)
+      return res.status(400).json({ error: `Interest for ${bank} must be between 0 and 30% a year.` });
+    if (!Number.isFinite(minAmount) || minAmount < 0)
+      return res.status(400).json({ error: `Minimum amount for ${bank} can't be negative.` });
+    clean.push({ bank, months, ratePct: Math.round(ratePct * 100) / 100, minAmount });
+  }
+  db.emiPlans = clean;
+  audit(
+    "emi",
+    clean.length
+      ? `${clean.length} plan${clean.length === 1 ? "" : "s"}: ${[...new Set(clean.map((p) => p.bank))].join(", ")}`
+      : "cleared - back to the simple EMI line"
+  );
+  save();
+  res.json({ ok: true, plans: db.emiPlans });
+});
 
 app.get("/api/rates", (req, res) =>
   res.json({ rates: db.rates, updatedAt: db.ratesUpdatedAt })
