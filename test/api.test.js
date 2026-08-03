@@ -1874,3 +1874,14 @@ test("order console: filters, pagination, notes, open-box photos and COD collect
   assert.ok(csv.split(/\r?\n/)[0].includes("email"));
   assert.ok(csv.includes("Total orders"));
 });
+
+test("customer directory export: columns, rows and summary block", async () => {
+  const csv = await fetch(`${BASE}/api/admin/export/customers.csv?key=dpj-admin-2026`).then((r) => r.text());
+  const lines = csv.split(/\r?\n/);
+  assert.ok(lines[0].includes("lifetimeValue") && lines[0].includes("tier"));
+  assert.ok(csv.includes("9800000077"), "console buyer appears");
+  assert.ok(csv.includes("Total customers"));
+  assert.ok(csv.includes("Registered accounts"));
+  const noKey = await fetch(`${BASE}/api/admin/export/customers.csv`);
+  assert.equal(noKey.status, 401);
+});

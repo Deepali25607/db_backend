@@ -1290,7 +1290,8 @@ app.get("/api/admin/footfall", requireAdmin, (req, res) => {
 // ---------------- customer profiles (back office) -------------------------
 // One row per phone number: registered accounts AND guest buyers. Reads only —
 // never creates loyalty accounts as a side effect.
-app.get("/api/admin/customers", requireAdmin, (req, res) => {
+// One rollup serves the directory and the CSV export.
+function customerDirectory() {
   const rows = new Map();
   for (const c of db.customers)
     rows.set(c.phone, {
@@ -1310,13 +1311,16 @@ app.get("/api/admin/customers", requireAdmin, (req, res) => {
     if (!["Cancelled", "Refunded"].includes(o.status)) r.spend += o.payable ?? o.total;
     if (!r.lastOrderAt || o.placedAt > r.lastOrderAt) r.lastOrderAt = o.placedAt;
   }
-  const out = [...rows.values()]
+  return [...rows.values()]
     .map((r) => {
       const acc = db.loyalty[r.phone];
       return { ...r, points: acc?.points ?? 0, tier: acc ? tierOf(acc).name : "Silver" };
     })
     .sort((a, b) => String(b.lastOrderAt || b.since || "").localeCompare(String(a.lastOrderAt || a.since || "")));
-  res.json(out);
+}
+
+app.get("/api/admin/customers", requireAdmin, (req, res) => {
+  res.json(customerDirectory());
 });
 
 app.get("/api/admin/customers/:phone", requireAdmin, (req, res) => {
@@ -3505,6 +3509,31 @@ app.get("/api/admin/export/orders.csv", (req, res) => {
     res,
     `dpj-orders-${new Date().toISOString().slice(0, 10)}.csv`,
     ["orderId", "placedAt", "status", "customer", "phone", "email", "pincode", "items", "paymentMode", "paymentStatus", "gross", "discount", "coupon", "payable"],
+    rows
+  );
+});
+
+app.get("/api/admin/export/customers.csv", (req, res) => {
+  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  const dir = customerDirectory();
+  const rows = dir.map((r) => [
+    r.name || "",
+    r.phone,
+    r.email || "",
+    r.registered ? "account" : "guest",
+    r.since || "",
+    r.orders,
+    r.spend,
+    r.points,
+    r.tier,
+    r.lastOrderAt || "",
+  ]);
+  const revenue = dir.reduce((s, r) => s + r.spend, 0);
+  rows.push([], ["Total customers", dir.length], ["Registered accounts", dir.filter((r) => r.registered).length], ["Lifetime revenue", revenue]);
+  sendCsv(
+    res,
+    `dpj-customers-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["name", "phone", "email", "type", "memberSince", "orders", "lifetimeValue", "points", "tier", "lastOrderAt"],
     rows
   );
 });
