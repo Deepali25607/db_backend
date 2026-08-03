@@ -2216,6 +2216,8 @@ app.get("/api/admin/rates", requireAdmin, (req, res) => {
     updatedAt: db.ratesUpdatedAt,
     proposals: [...db.rateProposals].reverse(),
     audit: [...db.rateAudit].slice(-30).reverse(),
+    // chronological feed for the console's price-history chart
+    history: db.rateAudit.slice(-400),
     guardPct: config.rateGuardPct,
     makerChecker: config.rateMakerChecker !== 0,
     purityFactors: PURITY_FACTORS,
