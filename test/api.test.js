@@ -1563,6 +1563,7 @@ test("discount rules engine: conditions, priority, making target, audiences", as
   const making = (await api("/api/products/aurelia-solitaire-ring")).data.product.price;
   assert.equal(making.discountBase, "making");
   assert.equal(making.discountLabel, "Festival making offer");
+  assert.equal(making.discountRatePct, 50, "configured rate rides along for the break-up line");
   assert.equal(making.discountValue, Math.round(bare.makingCharges * 0.5));
   assert.equal(making.taxable, bare.subtotal - making.discountValue);
   assert.equal(making.gstDetail.onJewellery, bare.gstDetail.onJewellery);

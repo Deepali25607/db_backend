@@ -102,6 +102,7 @@ function computePrice(product, rates, tax = DEFAULT_TAX, discount = 0) {
     otherCharges: round(otherValue),
     subtotal: round(subtotal),
     discountPct: displayPct,
+    discountRatePct: spec.pct, // the rate as configured, applied to its base
     discountBase: spec.base,
     discountLabel: spec.label,
     discountValue: round(discountValue),
