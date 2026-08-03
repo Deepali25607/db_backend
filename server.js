@@ -3515,6 +3515,37 @@ app.get("/api/admin/export/orders.csv", (req, res) => {
   );
 });
 
+// Rate-history report — honours the console's metal and window filters.
+app.get("/api/admin/export/rates.csv", (req, res) => {
+  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  const { metal, days } = req.query;
+  let rows = [...db.rateAudit];
+  if (metal) rows = rows.filter((h) => h.metal === metal);
+  const nDays = Number(days);
+  if (Number.isFinite(nDays) && nDays > 0)
+    rows = rows.filter((h) => Date.parse(h.at) >= Date.now() - nDays * 864e5);
+  const out = rows.reverse().map((h) => [
+    h.at,
+    h.metal,
+    h.purity,
+    h.from,
+    h.to,
+    `${h.to >= h.from ? "+" : "-"}${(Math.abs((h.to - h.from) / h.from) * 100).toFixed(2)}%`,
+    h.maker,
+    h.checker,
+  ]);
+  out.push([], ["Changes in report", rows.length], ["Window", Number.isFinite(nDays) && nDays > 0 ? `last ${nDays} days` : "full history"], ["Metal", metal || "all"], []);
+  out.push(["Current live rates (₹/g)"]);
+  for (const [m, table] of Object.entries(db.rates))
+    for (const [p, v] of Object.entries(table)) out.push([`${m} ${p}`, v]);
+  sendCsv(
+    res,
+    `dpj-rate-history-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["publishedAt", "metal", "purity", "from", "to", "move", "maker", "checker"],
+    out
+  );
+});
+
 app.get("/api/admin/export/customers.csv", (req, res) => {
   if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
   const dir = customerDirectory();

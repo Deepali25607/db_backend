@@ -1885,3 +1885,15 @@ test("customer directory export: columns, rows and summary block", async () => {
   const noKey = await fetch(`${BASE}/api/admin/export/customers.csv`);
   assert.equal(noKey.status, 401);
 });
+
+test("rate-history report: filtered CSV with summary and live rates", async () => {
+  const all = await fetch(`${BASE}/api/admin/export/rates.csv?key=dpj-admin-2026`).then((r) => r.text());
+  assert.ok(all.split(/\r?\n/)[0].includes("publishedAt"));
+  assert.ok(all.includes("Changes in report"));
+  assert.ok(all.includes("Current live rates"));
+  const goldOnly = await fetch(`${BASE}/api/admin/export/rates.csv?key=dpj-admin-2026&metal=gold&days=30`).then((r) => r.text());
+  assert.ok(goldOnly.includes("last 30 days"));
+  assert.ok(!goldOnly.split("Current live rates")[0].split(/\r?\n/).slice(1).some((l) => l.startsWith("") && l.includes(",silver,")), "silver rows filtered out");
+  const noKey = await fetch(`${BASE}/api/admin/export/rates.csv`);
+  assert.equal(noKey.status, 401);
+});
