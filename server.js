@@ -2514,9 +2514,24 @@ app.get("/api/admin/products", requireAdmin, (req, res) => {
       stock: Number.isFinite(p.stock) ? p.stock : null, // null = made-to-order
       featured: Boolean(p.featured),
       published: p.published !== false,
+      occasion: p.occasion || [],
     }))
   );
 });
+
+// Occasion tags drive the header mega-menu rows and the /shop occasion
+// filter — normalise so "Office" and " office " count as one row. The
+// vocabulary stays free (a new tag simply becomes a new menu row).
+function cleanOccasions(list) {
+  if (!Array.isArray(list)) return null;
+  const tags = [];
+  for (const raw of list) {
+    const t = String(raw || "").trim().toLowerCase().slice(0, 24);
+    if (t && !tags.includes(t)) tags.push(t);
+    if (tags.length === 6) break;
+  }
+  return tags.length ? tags : null;
+}
 
 // Create a single product from the admin form (FR-ADM-03 / FR-CAT).
 app.post("/api/admin/products", requireAdmin, (req, res) => {
@@ -2592,7 +2607,7 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
     category: b.category,
     collection: String(b.collection || "").trim() || "Atelier",
     gender: ["women", "men", "unisex"].includes(b.gender) ? b.gender : "women",
-    occasion: Array.isArray(b.occasion) && b.occasion.length ? b.occasion : ["daily"],
+    occasion: cleanOccasions(b.occasion) || ["daily"],
     metal: {
       type: metalType,
       purity,
@@ -2657,6 +2672,14 @@ app.patch("/api/admin/products/:slug", requireAdmin, (req, res) => {
           error: `"${u.slice(0, 60)}" is not a valid image URL (https://… or a /path on this site).`,
         });
     product.images = imgs;
+  }
+  if (body.occasion !== undefined) {
+    const occ = cleanOccasions(body.occasion);
+    if (!occ)
+      return res.status(400).json({
+        error: "Give at least one occasion tag — they drive the header menu and shop filters.",
+      });
+    product.occasion = occ;
   }
   audit("catalogue", `${product.slug}: ${Object.keys(body).join(", ")} updated`);
   save();
@@ -2801,7 +2824,7 @@ app.post("/api/admin/products/csv", requireAdmin, (req, res) => {
     }
     const sizeLabel = get("sizeLabel");
     const extraImages = get("extraImages") !== "" ? splitCell(get("extraImages")) : null;
-    const occasion = get("occasion") !== "" ? splitCell(get("occasion")) : null;
+    const occasion = get("occasion") !== "" ? cleanOccasions(splitCell(get("occasion"))) : null;
 
     const base = {
       name, category,
@@ -2873,11 +2896,11 @@ app.get("/api/admin/export/template.csv", (req, res) => {
     // plain gold band — only the everyday fields filled in
     ["kaveri-gold-band", "Kaveri Gold Band", "rings", "gold", "22K", "yellow", 4.4, 4.2, "perGram", 760, "",
       6, "10;12;14", "Slim daily-wear band in bright 22K.", "Heritage", "women",
-      "", "", "", "", "", 45, "", "7113", "", 0, 0, 1, "Ring size", 0, 1, "", "daily;work"],
+      "", "", "", "", "", 45, "", "7113", "", 0, 0, 1, "Ring size", 0, 1, "", "daily;office"],
     // certified diamond piece — every column in use, incl. stone & made-to-order
     ["ira-diamond-pendant", "Ira Diamond Pendant", "necklaces", "gold", "18K", "rose", 3.2, 2.9, "percent", 14, "",
       4, "", "Rose-gold pendant crowned with a certified solitaire.", "Éclat Bridal", "women",
-      "diamond", 0.25, 180000, "IGI", "IGI-2026-118", 45, 750, "7113", "", 1, 21, 0, "", 1, 1, "", "wedding;gift"],
+      "diamond", 0.25, 180000, "IGI", "IGI-2026-118", 45, 750, "7113", "", 1, 21, 0, "", 1, 1, "", "wedding;gifting"],
   ]);
 });
 

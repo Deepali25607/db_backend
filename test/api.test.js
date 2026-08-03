@@ -1765,3 +1765,43 @@ test("mega-menu data: live counts and starting-at prices per category", async ()
   const cheapest = (await api("/api/products?category=rings&metal=gold&sort=price-asc&limit=1")).data.items[0];
   assert.equal(gold.from, cheapest.price.total);
 });
+
+test("occasion tags: normalised on create, editable via PATCH, listed for admin", async () => {
+  // messy input → trimmed, lowercased, deduped
+  const created = await api("/api/admin/products", {
+    method: "POST", headers: ADMIN,
+    body: JSON.stringify({
+      name: "Occasion Test Hoop", category: "earrings", metalType: "gold", purity: "18K",
+      grossWeight: 3.1, netWeight: 3.0, making: { basis: "perGram", value: 650 },
+      occasion: [" Party ", "party", "GIFTING"],
+    }),
+  });
+  assert.equal(created.status, 201);
+  const pdp = await api("/api/products/occasion-test-hoop");
+  assert.deepEqual(pdp.data.product.occasion, ["party", "gifting"]);
+
+  // the tags flow into the mega-menu counts for that category
+  const menu1 = (await api("/api/menu")).data.menu.find((m) => m.key === "earrings");
+  assert.ok(menu1.occasions.some((o) => o.key === "party" && o.count >= 1));
+
+  // retag via PATCH; the admin listing carries the tags
+  const patched = await api("/api/admin/products/occasion-test-hoop", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ occasion: ["Office", "wedding "] }),
+  });
+  assert.equal(patched.status, 200);
+  const listed = (await api("/api/admin/products", { headers: ADMIN })).data
+    .find((p) => p.slug === "occasion-test-hoop");
+  assert.deepEqual(listed.occasion, ["office", "wedding"]);
+
+  // a piece can never lose its last tag
+  const empty = await api("/api/admin/products/occasion-test-hoop", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ occasion: [] }),
+  });
+  assert.equal(empty.status, 400);
+
+  // CSV template ships canonical example tags; export round-trips the column
+  const template = await fetch(`${BASE}/api/admin/export/template.csv?key=dpj-admin-2026`).then((r) => r.text());
+  assert.ok(template.includes("daily;office") && template.includes("wedding;gifting"));
+  const exported = await fetch(`${BASE}/api/admin/export/catalogue.csv?key=dpj-admin-2026`).then((r) => r.text());
+  assert.ok(exported.split(/\r?\n/).some((l) => l.includes("occasion-test-hoop") && l.includes("office;wedding")));
+});
