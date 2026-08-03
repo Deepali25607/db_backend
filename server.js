@@ -840,6 +840,43 @@ app.get("/api/categories", (req, res) => {
   );
 });
 
+// Mega-menu data (storefront header): live design counts, occasion splits
+// and true "starting at" prices per metal/purity — computed from the
+// published catalogue at today's rates with current discounts applied.
+app.get("/api/menu", (req, res) => {
+  const menu = categories
+    .map((c) => {
+      const items = published().filter((p) => p.category === c.key);
+      if (items.length === 0) return null;
+      const pricedItems = items.map((p) => ({ p, total: priceOf(p).total }));
+      const occCount = {};
+      for (const { p } of pricedItems)
+        for (const o of p.occasion || []) occCount[o] = (occCount[o] || 0) + 1;
+      const metals = {};
+      const purities = {};
+      for (const { p, total } of pricedItems) {
+        const m = p.metal.type;
+        if (!(m in metals) || total < metals[m]) metals[m] = total;
+        const pu = p.metal.purity;
+        if (!(pu in purities) || total < purities[pu]) purities[pu] = total;
+      }
+      return {
+        key: c.key,
+        label: c.label,
+        image: c.image,
+        tagline: c.tagline,
+        count: items.length,
+        occasions: Object.entries(occCount)
+          .sort((a, b) => b[1] - a[1])
+          .map(([key, count]) => ({ key, count })),
+        metals: Object.entries(metals).map(([type, from]) => ({ type, from })),
+        purities: Object.entries(purities).map(([purity, from]) => ({ purity, from })),
+      };
+    })
+    .filter(Boolean);
+  res.json({ menu });
+});
+
 app.get("/api/products", (req, res) => {
   const { category, metal, purity, occasion, gender, minPrice, maxPrice, q, sort, featured, limit } = req.query;
   let items = published().map(listItem);

@@ -1748,3 +1748,20 @@ test("phone-first tracking lists every order product-wise, no order id needed", 
   assert.equal(upd.status, 200);
   assert.equal(upd.data.gender, "Female");
 });
+
+test("mega-menu data: live counts and starting-at prices per category", async () => {
+  const { menu } = (await api("/api/menu")).data;
+  assert.ok(menu.length >= 3, "categories with published pieces appear");
+  const rings = menu.find((m) => m.key === "rings");
+  assert.ok(rings, "rings category present");
+  assert.ok(rings.count >= 1);
+  assert.ok(rings.image && rings.label === "Rings");
+  assert.ok(rings.occasions.length >= 1 && rings.occasions[0].count >= 1);
+  assert.ok(rings.metals.length >= 1);
+  const gold = rings.metals.find((x) => x.type === "gold");
+  assert.ok(gold && gold.from > 0, "gold starting-at price computed");
+  assert.ok(rings.purities.every((x) => x.from > 0));
+  // starting-at equals the cheapest live-priced piece in that slice
+  const cheapest = (await api("/api/products?category=rings&metal=gold&sort=price-asc&limit=1")).data.items[0];
+  assert.equal(gold.from, cheapest.price.total);
+});
