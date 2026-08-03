@@ -1805,3 +1805,72 @@ test("occasion tags: normalised on create, editable via PATCH, listed for admin"
   const exported = await fetch(`${BASE}/api/admin/export/catalogue.csv?key=dpj-admin-2026`).then((r) => r.text());
   assert.ok(exported.split(/\r?\n/).some((l) => l.includes("occasion-test-hoop") && l.includes("office;wedding")));
 });
+
+test("order console: filters, pagination, notes, open-box photos and COD collection", async () => {
+  // cheapest silver piece that is actually buyable (an earlier test sells one out)
+  const silvers = (await api("/api/products?metal=silver&sort=price-asc")).data.items;
+  let cheap = null;
+  for (const s of silvers) {
+    const pdp = (await api(`/api/products/${s.slug}`)).data.product;
+    if (pdp.stock === null || pdp.stock > 0) { cheap = s; break; }
+  }
+  assert.ok(cheap, "a buyable silver piece exists");
+  const placed = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: JSON.stringify({
+      items: [{ slug: cheap.slug, qty: 1 }],
+      customer: { name: "Console Buyer", phone: "9800000077", address: "7 Console Rd, Indore", pincode: "452001" },
+      payment: { mode: "cod" },
+      location: { lat: 22.7196, lng: 75.8577 },
+    }),
+  });
+  assert.ok(placed.data.orderId, `order failed: ${JSON.stringify(placed.data)}`);
+  const oid = placed.data.orderId;
+
+  // filters narrow server-side; pagination meta is honest
+  const one = await api(`/api/admin/orders?q=${oid.slice(-6)}&page=1&limit=5`, { headers: ADMIN });
+  assert.equal(one.data.orders.length, 1);
+  assert.equal(one.data.orders[0].orderId, oid);
+  assert.equal(one.data.meta.total, 1);
+  assert.ok(one.data.meta.counts.Placed >= 1, "counts cover all orders");
+  assert.deepEqual(one.data.orders[0].location, { lat: 22.7196, lng: 75.8577, source: "gps" });
+  const paged = await api("/api/admin/orders?page=1&limit=2", { headers: ADMIN });
+  assert.equal(paged.data.orders.length, 2);
+  assert.ok(paged.data.meta.totalPages >= 2);
+  const custFiltered = await api("/api/admin/orders?customer=console%20buyer", { headers: ADMIN });
+  assert.ok(custFiltered.data.orders.some((o) => o.orderId === oid));
+
+  // an illegal transition names the legal ones
+  const bad = await api(`/api/admin/orders/${oid}/status`, {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ status: "Returned" }),
+  });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.data.error.includes("Legal next statuses"));
+
+  // Delivered with a note + photos: COD flips to paid, photos stamped, timeline enriched
+  const done = await api(`/api/admin/orders/${oid}/status`, {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      status: "Delivered",
+      note: "Handed over at the door",
+      deliveryPhotos: [{ url: "/api/uploads/openbox-1.png" }, { url: "not a url" }],
+    }),
+  });
+  assert.equal(done.status, 200);
+  const o = done.data.order;
+  assert.equal(o.status, "Delivered");
+  assert.equal(o.payment.status, "paid");
+  assert.equal(o.deliveryPhotos.length, 1, "invalid photo URL dropped, valid one kept");
+  assert.ok(o.deliveryPhotos[0].uploadedAt && o.deliveryPhotos[0].uploadedBy === "admin");
+  const last = o.statusTimeline[o.statusTimeline.length - 1];
+  assert.equal(last.note, "Handed over at the door");
+  assert.equal(last.paymentCollected, true);
+  assert.equal(last.photoCount, 1);
+  assert.ok(o.invoice, "invoice raised once COD is collected");
+  assert.deepEqual(o.nextStatuses, ["Returned"]);
+
+  // export: new columns plus the summary block
+  const csv = await fetch(`${BASE}/api/admin/export/orders.csv?key=dpj-admin-2026`).then((r) => r.text());
+  assert.ok(csv.split(/\r?\n/)[0].includes("email"));
+  assert.ok(csv.includes("Total orders"));
+});

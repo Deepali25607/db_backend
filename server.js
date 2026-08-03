@@ -461,6 +461,15 @@ function buildOrderDraft(body, req) {
       );
   }
 
+  // GPS snapshot when the customer shared their location at checkout —
+  // the admin console links straight to the pin for the delivery run.
+  const locLat = Number(body.location?.lat);
+  const locLng = Number(body.location?.lng);
+  const location =
+    method === "ship" && Number.isFinite(locLat) && Number.isFinite(locLng)
+      ? { lat: locLat, lng: locLng, source: "gps" }
+      : null;
+
   return {
     lines,
     total,
@@ -470,6 +479,7 @@ function buildOrderDraft(body, req) {
     redeemed,
     payable,
     mode,
+    location,
     fulfilment: {
       method,
       store: pickupStore ? { key: pickupStore.key, name: pickupStore.name } : null,
@@ -567,6 +577,7 @@ function createOrder(draft, paymentStatus, intentId = null) {
     gstin: draft.gstin || null,
     payment: { mode: draft.mode, status: paymentStatus, intentId },
     customer: draft.customer,
+    location: draft.location || null,
   };
   if (db.abandoned) delete db.abandoned[draft.customer.phone];
   db.orders.push(order);
@@ -1989,11 +2000,44 @@ app.get("/api/admin/analytics", requireAdmin, (req, res) => {
   });
 });
 
+// Newest-first, with optional server-side filters and pagination. A call
+// without page/limit returns the full list (existing consumers rely on it);
+// meta.counts always covers ALL orders so the status chips stay stable
+// while a filter narrows the table.
 app.get("/api/admin/orders", requireAdmin, (req, res) => {
+  const { q, customer, status, payment, from, to } = req.query;
+  let orders = [...db.orders].reverse();
+  if (q) orders = orders.filter((o) => o.orderId.toLowerCase().includes(String(q).toLowerCase()));
+  if (customer) {
+    const needle = String(customer).toLowerCase();
+    orders = orders.filter((o) =>
+      `${o.customer.name} ${o.customer.phone} ${o.customer.email || ""}`.toLowerCase().includes(needle)
+    );
+  }
+  if (status) orders = orders.filter((o) => o.status === status);
+  if (payment) orders = orders.filter((o) => o.payment.status === payment);
+  if (from) orders = orders.filter((o) => o.placedAt.slice(0, 10) >= from);
+  if (to) orders = orders.filter((o) => o.placedAt.slice(0, 10) <= to);
+
+  const counts = {};
+  for (const o of db.orders) counts[o.status] = (counts[o.status] || 0) + 1;
+
+  const total = orders.length;
+  let page = 1;
+  let limit = total;
+  let totalPages = 1;
+  if (req.query.page !== undefined || req.query.limit !== undefined) {
+    limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    totalPages = Math.max(1, Math.ceil(total / limit));
+    page = Math.min(totalPages, Math.max(1, Number(req.query.page) || 1));
+    orders = orders.slice((page - 1) * limit, page * limit);
+  }
+
   res.json({
     flow: ORDER_FLOW,
     special: SPECIAL_STATUS,
-    orders: [...db.orders].reverse().map((o) => ({ ...o, nextStatuses: nextStatuses(o.status) })),
+    orders: orders.map((o) => ({ ...o, nextStatuses: nextStatuses(o.status) })),
+    meta: { page, limit, total, totalPages, counts },
   });
 });
 
@@ -2064,10 +2108,42 @@ app.patch("/api/admin/orders/:orderId/status", requireAdmin, (req, res) => {
   const order = db.orders.find((o) => o.orderId === req.params.orderId);
   if (!order) return res.status(404).json({ error: "Order not found" });
   const to = req.body?.status;
-  if (!canTransition(order.status, to))
-    return res.status(400).json({ error: `Cannot move from "${order.status}" to "${to}"` });
-  applyOrderTransition(order, to, req.body?.by || "admin");
-  res.json({ ok: true, order });
+  if (!canTransition(order.status, to)) {
+    const legal = nextStatuses(order.status);
+    return res.status(400).json({
+      error: `Cannot move from "${order.status}" to "${to}". ${legal.length ? `Legal next statuses: ${legal.join(", ")}.` : `"${order.status}" is a terminal status.`}`,
+    });
+  }
+  const by = req.body?.by || "admin";
+  const note = String(req.body?.note || "").trim().slice(0, 500) || null;
+
+  // Open-box delivery photos — honoured only on the Delivered transition,
+  // stamped server-side so the record says when and by whom.
+  let photos = [];
+  if (to === "Delivered" && Array.isArray(req.body?.deliveryPhotos)) {
+    const at = new Date().toISOString();
+    photos = req.body.deliveryPhotos
+      .map((p) => String(p?.url || "").trim())
+      .filter((u) => /^(https?:\/\/|\/)[^\s"']+$/i.test(u) && u.length <= 600)
+      .slice(0, 8)
+      .map((url) => ({ url, uploadedAt: at, uploadedBy: by }));
+    if (photos.length) order.deliveryPhotos = (order.deliveryPhotos || []).concat(photos);
+  }
+
+  applyOrderTransition(order, to, by);
+
+  // enrich the entry the transition just appended (timeline is append-only)
+  const entry = order.statusTimeline[order.statusTimeline.length - 1];
+  if (note) entry.note = note;
+  if (photos.length) entry.photoCount = photos.length;
+  if (to === "Delivered" && order.payment.mode === "cod" && order.payment.status !== "paid") {
+    // cash collected at the doorstep — the delivery marks COD as paid
+    order.payment.status = "paid";
+    entry.paymentCollected = true;
+    if (invoiceEligible(order)) ensureInvoice(order);
+  }
+  save();
+  res.json({ ok: true, order: { ...order, nextStatuses: nextStatuses(order.status) } });
 });
 
 // Customer-driven cancellation (order policy): allowed strictly before the
@@ -3406,24 +3482,30 @@ function sendCsv(res, filename, header, rows) {
 
 app.get("/api/admin/export/orders.csv", (req, res) => {
   if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  const rows = [...db.orders].reverse().map((o) => [
+    o.orderId,
+    o.placedAt,
+    o.status,
+    o.customer.name,
+    o.customer.phone,
+    o.customer.email || "",
+    o.customer.pincode || "",
+    o.lines.map((l) => `${l.name}${l.size ? ` (${l.size})` : ""} x${l.qty}`).join("; "),
+    o.payment.mode,
+    o.payment.status,
+    o.total,
+    o.discount || 0,
+    o.coupon || "",
+    o.payable ?? o.total,
+  ]);
+  // summary block for the shop's day-book
+  const live = db.orders.filter((o) => !["Cancelled", "Refunded"].includes(o.status));
+  rows.push([], ["Total orders", db.orders.length], ["Open + fulfilled revenue", live.reduce((s, o) => s + (o.payable ?? o.total), 0)]);
   sendCsv(
     res,
-    "dpj-orders.csv",
-    ["orderId", "placedAt", "status", "customer", "phone", "items", "paymentMode", "paymentStatus", "gross", "discount", "coupon", "payable"],
-    db.orders.map((o) => [
-      o.orderId,
-      o.placedAt,
-      o.status,
-      o.customer.name,
-      o.customer.phone,
-      o.lines.map((l) => `${l.name}${l.size ? ` (${l.size})` : ""} x${l.qty}`).join("; "),
-      o.payment.mode,
-      o.payment.status,
-      o.total,
-      o.discount || 0,
-      o.coupon || "",
-      o.payable ?? o.total,
-    ])
+    `dpj-orders-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["orderId", "placedAt", "status", "customer", "phone", "email", "pincode", "items", "paymentMode", "paymentStatus", "gross", "discount", "coupon", "payable"],
+    rows
   );
 });
 
