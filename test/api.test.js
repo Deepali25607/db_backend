@@ -1908,3 +1908,92 @@ test("rate-history report: filtered CSV with summary and live rates", async () =
   const noKey = await fetch(`${BASE}/api/admin/export/rates.csv`);
   assert.equal(noKey.status, 401);
 });
+
+test("admin users: accounts, sessions, permission tiles and guards", async () => {
+  // first boot seeded the owner with every tile; the hash never leaves the API
+  const list0 = await api("/api/admin/users", { headers: ADMIN });
+  assert.equal(list0.status, 200);
+  const owner = list0.data.users.find((u) => u.email === "owner@dpjewellers.example");
+  assert.ok(owner && owner.permissions.includes("admin-users"));
+  assert.equal(owner.passwordHash, undefined);
+  assert.ok(list0.data.catalog.includes("admin-users"));
+
+  // unknown email and wrong password answer identically (no enumeration)
+  const bad1 = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "nobody@x.example", password: "Wrong@123" }) });
+  const bad2 = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "owner@dpjewellers.example", password: "Wrong@123" }) });
+  assert.equal(bad1.status, 401);
+  assert.equal(bad2.status, 401);
+  assert.equal(bad1.data.error, bad2.data.error);
+
+  const login = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "owner@dpjewellers.example", password: "Dpj@2026!" }) });
+  assert.equal(login.status, 200);
+  assert.ok(login.data.token && login.data.admin.email === "owner@dpjewellers.example");
+  const ownerAuth = { "content-type": "application/json", authorization: `Bearer ${login.data.token}` };
+  const meRes = await api("/api/admin/me", { headers: ownerAuth });
+  assert.equal(meRes.data.admin.email, "owner@dpjewellers.example");
+
+  // per-field validation envelope
+  const badCreate = await api("/api/admin/users", { method: "POST", headers: ADMIN, body: JSON.stringify({ name: "X", email: "not-an-email", password: "weak", permissions: [] }) });
+  assert.equal(badCreate.status, 400);
+  assert.ok(badCreate.data.details.fieldErrors.password.includes("Needs an uppercase letter"));
+  assert.ok(badCreate.data.details.fieldErrors.permissions);
+
+  // create an orders-only clerk (email lowercased, permissions deduped)
+  const created = await api("/api/admin/users", { method: "POST", headers: ADMIN, body: JSON.stringify({ name: "Orders Clerk", email: "Clerk@DPJ.example", password: "Clerk@123", permissions: ["orders", "orders"] }) });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.user.email, "clerk@dpj.example");
+  assert.deepEqual(created.data.user.permissions, ["orders"]);
+  const dupe = await api("/api/admin/users", { method: "POST", headers: ADMIN, body: JSON.stringify({ name: "Again", email: "clerk@dpj.example", password: "Clerk@123", permissions: ["orders"] }) });
+  assert.equal(dupe.status, 409);
+
+  // the clerk is fenced to their tiles
+  const clerkLogin = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "clerk@dpj.example", password: "Clerk@123" }) });
+  const clerkAuth = { "content-type": "application/json", authorization: `Bearer ${clerkLogin.data.token}` };
+  assert.equal((await api("/api/admin/orders", { headers: clerkAuth })).status, 200);
+  const fenced = await api("/api/admin/customers", { headers: clerkAuth });
+  assert.equal(fenced.status, 403);
+  assert.match(fenced.data.error, /Requires permission: customers/);
+  assert.equal((await api("/api/admin/users", { headers: clerkAuth })).status, 403);
+
+  // last-admin guard: the owner is the only active gatekeeper
+  const strip = await api(`/api/admin/users/${owner.id}`, { method: "PATCH", headers: ADMIN, body: JSON.stringify({ permissions: ["dashboard"] }) });
+  assert.equal(strip.status, 400);
+  assert.match(strip.data.error, /only admin who has it/);
+  const disableOwner = await api(`/api/admin/users/${owner.id}`, { method: "DELETE", headers: ADMIN });
+  assert.equal(disableOwner.status, 400);
+
+  // self-protection (same-value patches are allowed no-ops)
+  const selfPerm = await api(`/api/admin/users/${owner.id}`, { method: "PATCH", headers: ownerAuth, body: JSON.stringify({ permissions: ["dashboard"] }) });
+  assert.equal(selfPerm.status, 400);
+  assert.match(selfPerm.data.error, /own permissions/);
+  const selfStatus = await api(`/api/admin/users/${owner.id}`, { method: "PATCH", headers: ownerAuth, body: JSON.stringify({ status: "Disabled" }) });
+  assert.match(selfStatus.data.error, /own status/);
+  const noop = await api(`/api/admin/users/${owner.id}`, { method: "PATCH", headers: ownerAuth, body: JSON.stringify({ permissions: owner.permissions, name: "Portal Owner" }) });
+  assert.equal(noop.status, 200);
+
+  // admin-initiated reset: blocked on self, revokes the target's sessions
+  const selfReset = await api(`/api/admin/users/${owner.id}/password`, { method: "PATCH", headers: ownerAuth, body: JSON.stringify({ password: "Another@1" }) });
+  assert.equal(selfReset.status, 400);
+  const reset = await api(`/api/admin/users/${created.data.user.id}/password`, { method: "PATCH", headers: ADMIN, body: JSON.stringify({ password: "Fresh@123" }) });
+  assert.equal(reset.status, 200);
+  const deadSession = await api("/api/admin/orders", { headers: clerkAuth });
+  assert.equal(deadSession.status, 401);
+  assert.match(deadSession.data.error, /no longer active/);
+  const relogin = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "clerk@dpj.example", password: "Fresh@123" }) });
+  assert.equal(relogin.status, 200);
+
+  // disable = soft delete + instant kick-out; a disabled clerk cannot sign in
+  const off = await api(`/api/admin/users/${created.data.user.id}`, { method: "DELETE", headers: ADMIN });
+  assert.equal(off.status, 200);
+  const kicked = await api("/api/admin/orders", { headers: { "content-type": "application/json", authorization: `Bearer ${relogin.data.token}` } });
+  assert.equal(kicked.status, 401);
+  const disabledLogin = await api("/api/admin/login", { method: "POST", headers: JSONH, body: JSON.stringify({ email: "clerk@dpj.example", password: "Fresh@123" }) });
+  assert.equal(disabledLogin.status, 401);
+  assert.equal(disabledLogin.data.error, "Admin account is not active");
+
+  // export authenticates by session token too, and enforces the tile
+  const csv = await fetch(`${BASE}/api/admin/export/admin-users.csv?token=${login.data.token}`).then((r) => r.text());
+  assert.ok(csv.includes("Total admins"));
+  const noAuth = await fetch(`${BASE}/api/admin/export/admin-users.csv`);
+  assert.equal(noAuth.status, 401);
+});

@@ -1513,10 +1513,128 @@ app.post("/api/newsletter", (req, res) => {
 });
 
 // ------------------------------------------------------------------ admin
+// Two ways into the back office: the master key (env ADMIN_KEY — full
+// access, kept for bootstrap and ops) or a personal admin account
+// (email + password → a DB-backed session token). Sessions live in the
+// store, so deleting a row or disabling the account locks that person
+// out on their very next request.
+const ADMIN_PERMISSIONS = Object.freeze([
+  "dashboard", "orders", "customers", "rates", "catalogue", "schemes",
+  "returns", "appointments", "callbacks", "promos", "buyback", "enquiries",
+  "notifications", "settings", "admin-users",
+]);
+const ADMIN_SESSION_DAYS = 7;
+
+if (!Array.isArray(db.adminUsers)) db.adminUsers = [];
+if (!db.adminSessions || typeof db.adminSessions !== "object") db.adminSessions = {};
+
+// scrypt with a per-user salt — built into node, timing-safe compare
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  return `${salt}:${crypto.scryptSync(password, salt, 64).toString("hex")}`;
+}
+function verifyPassword(password, stored) {
+  const [salt, hash] = String(stored || "").split(":");
+  if (!salt || !hash) return false;
+  const check = crypto.scryptSync(password, salt, 64);
+  const known = Buffer.from(hash, "hex");
+  return known.length === check.length && crypto.timingSafeEqual(check, known);
+}
+function safeAdmin(u) {
+  const { passwordHash, ...rest } = u;
+  return rest;
+}
+
+// First boot seeds the owner with every tile. Idempotent — an existing
+// account (and its password) is never touched on restart.
+if (db.adminUsers.length === 0) {
+  db.adminUsers.push({
+    id: crypto.randomUUID(),
+    name: process.env.DPJ_OWNER_NAME || "Portal Owner",
+    email: String(process.env.DPJ_OWNER_EMAIL || "owner@dpjewellers.example").toLowerCase(),
+    passwordHash: hashPassword(process.env.DPJ_OWNER_PASSWORD || "Dpj@2026!"),
+    permissions: [...ADMIN_PERMISSIONS],
+    status: "Active",
+    createdAt: new Date().toISOString(),
+    lastLogin: null,
+  });
+  save();
+}
+
+// Which tile guards which admin route — enforced inside requireAdmin so
+// every existing endpoint is covered without editing each one. Paths not
+// listed (uploads, login/logout/me) just need any valid admin.
+const ADMIN_ROUTE_TILES = [
+  [/^\/(orders)/, "orders"],
+  [/^\/(customers)/, "customers"],
+  [/^\/(rates)/, "rates"],
+  [/^\/(products)/, "catalogue"],
+  [/^\/(schemes|scheme-variants)/, "schemes"],
+  [/^\/returns/, "returns"],
+  [/^\/appointments/, "appointments"],
+  [/^\/callbacks/, "callbacks"],
+  [/^\/coupons/, "promos"],
+  [/^\/buyback/, "buyback"],
+  [/^\/enquiries/, "enquiries"],
+  [/^\/notifications/, "notifications"],
+  [/^\/(summary|abandoned|analytics|audit)/, "dashboard"],
+  [/^\/(config|content|stores|emi-plans|discount-rules|backup)/, "settings"],
+  [/^\/users/, "admin-users"],
+];
+function tileForAdminPath(path) {
+  const p = String(path).replace(/^\/api\/admin/, "");
+  const hit = ADMIN_ROUTE_TILES.find(([re]) => re.test(p));
+  return hit ? hit[1] : null;
+}
+
+function adminFromToken(token) {
+  const s = db.adminSessions[token];
+  if (!s) return { error: "Admin session no longer active", code: 401 };
+  if (Date.parse(s.expiresAt) < Date.now()) {
+    delete db.adminSessions[token]; // lazy cleanup of expired rows
+    save();
+    return { error: "Admin session no longer active", code: 401 };
+  }
+  const user = db.adminUsers.find((u) => u.id === s.adminId);
+  if (!user) return { error: "Admin session no longer active", code: 401 };
+  if (user.status !== "Active") return { error: "Admin account is not active", code: 403 };
+  return { user };
+}
+
 function requireAdmin(req, res, next) {
-  if (req.headers["x-admin-key"] !== ADMIN_KEY)
-    return res.status(401).json({ error: "Not authorised" });
+  let admin;
+  if (req.headers["x-admin-key"] === ADMIN_KEY) {
+    admin = { id: "master-key", name: "Master key", email: null, permissions: [...ADMIN_PERMISSIONS], master: true };
+  } else {
+    const bearer = String(req.headers.authorization || "");
+    const token = bearer.startsWith("Bearer ") ? bearer.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Not authorised" });
+    const got = adminFromToken(token);
+    if (got.error) return res.status(got.code).json({ error: got.error });
+    admin = safeAdmin(got.user);
+    req.adminToken = token;
+  }
+  const tile = tileForAdminPath(req.path);
+  if (tile && !admin.permissions.includes(tile))
+    return res.status(403).json({ error: `Requires permission: ${tile}` });
+  req.adminUser = admin;
   next();
+}
+
+// CSV/backup downloads are plain links — they authenticate via ?key=
+// (master) or ?token= (admin session), with the same tile check.
+function exportAuthed(req, res, tile) {
+  if (req.query.key === ADMIN_KEY) return true;
+  const got = adminFromToken(String(req.query.token || ""));
+  if (got.error) {
+    res.status(401).send("Not authorised");
+    return false;
+  }
+  if (tile && !got.user.permissions.includes(tile)) {
+    res.status(403).send(`Requires permission: ${tile}`);
+    return false;
+  }
+  return true;
 }
 
 // Global admin audit trail (FR-ADM) — every back-office mutation lands here.
@@ -1885,7 +2003,7 @@ app.patch("/api/admin/content", requireAdmin, (req, res) => {
 // Full operational snapshot for offline backup (pair with pg_dump for the
 // database-level backup; this one is human-readable and restorable by hand).
 app.get("/api/admin/export/backup.json", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "settings")) return;
   res.setHeader(
     "Content-Disposition",
     `attachment; filename="dpj-backup-${new Date().toISOString().slice(0, 10)}.json"`
@@ -1893,20 +2011,276 @@ app.get("/api/admin/export/backup.json", (req, res) => {
   res.json({ exportedAt: new Date().toISOString(), collections: db });
 });
 
-// In-memory brute-force guard: 5 wrong keys → 60 s lockout per client.
+// In-memory brute-force guard: 5 failures → 60 s lockout per client.
 const adminFailures = new Map();
 app.post("/api/admin/login", (req, res) => {
   const ip = req.ip || "unknown";
   const failed = adminFailures.get(ip);
   if (failed && failed.until > Date.now())
     return res.status(429).json({ error: "Too many attempts — try again in a minute." });
-  if (req.body?.key !== ADMIN_KEY) {
+  const fail = (status, message) => {
     const count = (failed?.count || 0) + 1;
     adminFailures.set(ip, { count, until: count >= 5 ? Date.now() + 60000 : 0 });
-    return res.status(401).json({ error: "Wrong admin key" });
+    return res.status(status).json({ error: message });
+  };
+
+  const { key, email, password } = req.body || {};
+  // master-key path (unchanged behaviour)
+  if (email === undefined && password === undefined) {
+    if (key !== ADMIN_KEY) return fail(401, "Wrong admin key");
+    adminFailures.delete(ip);
+    return res.json({ ok: true });
   }
+
+  // account sign-in — unknown email and wrong password answer identically
+  const user = db.adminUsers.find((u) => u.email === String(email || "").trim().toLowerCase());
+  if (!user || !verifyPassword(String(password || ""), user.passwordHash))
+    return fail(401, "Invalid email or password");
+  if (user.status !== "Active") return fail(401, "Admin account is not active");
   adminFailures.delete(ip);
+  const token = crypto.randomBytes(32).toString("hex");
+  const now = new Date();
+  db.adminSessions[token] = {
+    adminId: user.id,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + ADMIN_SESSION_DAYS * 864e5).toISOString(),
+  };
+  user.lastLogin = now.toISOString();
+  audit("admin-login", `${user.email} signed in (${ip})`);
+  save();
+  res.json({ ok: true, admin: safeAdmin(user), token });
+});
+
+app.post("/api/admin/logout", requireAdmin, (req, res) => {
+  if (req.adminToken) {
+    delete db.adminSessions[req.adminToken];
+    save();
+  }
   res.json({ ok: true });
+});
+
+app.get("/api/admin/me", requireAdmin, (req, res) =>
+  res.json({ admin: req.adminUser, catalog: ADMIN_PERMISSIONS })
+);
+
+app.patch("/api/admin/me", requireAdmin, (req, res) => {
+  if (req.adminUser.master)
+    return res.status(400).json({ error: "The master key has no profile to edit." });
+  const name = String(req.body?.name || "").trim();
+  if (name.length < 2 || name.length > 100)
+    return res.status(400).json({ error: "Name must be 2–100 characters." });
+  const user = db.adminUsers.find((u) => u.id === req.adminUser.id);
+  user.name = name;
+  save();
+  res.json({ ok: true, admin: safeAdmin(user) });
+});
+
+app.patch("/api/admin/me/password", requireAdmin, (req, res) => {
+  if (req.adminUser.master)
+    return res.status(400).json({ error: "The master key has no password to change here." });
+  const user = db.adminUsers.find((u) => u.id === req.adminUser.id);
+  if (!verifyPassword(String(req.body?.currentPassword || ""), user.passwordHash))
+    return res.status(401).json({ error: "Current password is incorrect." });
+  const errors = passwordErrors(String(req.body?.newPassword || ""));
+  if (errors.length)
+    return res.status(400).json({ error: "Invalid request body", details: { fieldErrors: { newPassword: errors } } });
+  user.passwordHash = hashPassword(String(req.body.newPassword));
+  // every OTHER session of this admin ends; the current one stays signed in
+  for (const [t, s] of Object.entries(db.adminSessions))
+    if (s.adminId === user.id && t !== req.adminToken) delete db.adminSessions[t];
+  audit("admin-password", `${user.email} changed their password`);
+  save();
+  res.json({ ok: true });
+});
+
+// ------------------------------------------- Admin Users (tile: admin-users)
+// The most privileged corner of the portal: create colleagues, hand out
+// dashboard tiles, reset passwords, disable accounts. Soft-delete only —
+// rows are never removed, so the audit history keeps its names.
+function passwordErrors(pw) {
+  const errors = [];
+  if (pw.length < 8) errors.push("Min 8 characters");
+  if (!/[A-Z]/.test(pw)) errors.push("Needs an uppercase letter");
+  if (!/\d/.test(pw)) errors.push("Needs a number");
+  if (!/[^A-Za-z0-9]/.test(pw)) errors.push("Needs a special character");
+  return errors;
+}
+function cleanPermissions(list) {
+  if (!Array.isArray(list)) return null;
+  const set = [...new Set(list.map((p) => String(p)))].filter((p) => ADMIN_PERMISSIONS.includes(p));
+  set.sort((a, b) => ADMIN_PERMISSIONS.indexOf(a) - ADMIN_PERMISSIONS.indexOf(b));
+  return set;
+}
+const activeGatekeepers = () =>
+  db.adminUsers.filter((u) => u.status === "Active" && u.permissions.includes("admin-users")).length;
+const purgeSessions = (adminId) => {
+  for (const [t, s] of Object.entries(db.adminSessions)) if (s.adminId === adminId) delete db.adminSessions[t];
+};
+const byLine = (req) => `${req.adminUser.master ? "master key" : req.adminUser.email} @ ${req.ip || "?"}`;
+
+app.get("/api/admin/users", requireAdmin, (req, res) => {
+  const { q, permission, status } = req.query;
+  let rows = [...db.adminUsers].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (q) {
+    const needle = String(q).toLowerCase();
+    rows = rows.filter((u) => `${u.name} ${u.email}`.toLowerCase().includes(needle));
+  }
+  if (permission) rows = rows.filter((u) => u.permissions.includes(String(permission)));
+  if (status && ["Active", "Disabled"].includes(String(status)))
+    rows = rows.filter((u) => u.status === status);
+  const total = rows.length;
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(totalPages, Math.max(1, Number(req.query.page) || 1));
+  res.json({
+    users: rows.slice((page - 1) * limit, page * limit).map(safeAdmin),
+    meta: { page, limit, total, totalPages },
+    catalog: ADMIN_PERMISSIONS,
+  });
+});
+
+app.post("/api/admin/users", requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const fieldErrors = {};
+  const name = String(b.name || "").trim();
+  if (name.length < 2 || name.length > 100) fieldErrors.name = ["Name must be 2–100 characters"];
+  const email = String(b.email || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) || email.length > 150)
+    fieldErrors.email = ["Enter a valid email address"];
+  const pwErrors = passwordErrors(String(b.password || ""));
+  if (pwErrors.length) fieldErrors.password = pwErrors;
+  const permissions = cleanPermissions(b.permissions);
+  if (!permissions || permissions.length === 0)
+    fieldErrors.permissions = ["Pick at least one dashboard tile"];
+  if (Object.keys(fieldErrors).length)
+    return res.status(400).json({ error: "Invalid request body", details: { fieldErrors } });
+  if (db.adminUsers.some((u) => u.email === email))
+    return res.status(409).json({ error: "Admin with that email already exists" });
+
+  const user = {
+    id: crypto.randomUUID(),
+    name,
+    email,
+    passwordHash: hashPassword(String(b.password)),
+    permissions,
+    status: "Active",
+    createdAt: new Date().toISOString(),
+    lastLogin: null,
+  };
+  db.adminUsers.push(user);
+  audit("admin-user-create", `${email} [${permissions.join(", ")}] by ${byLine(req)}`);
+  save();
+  res.status(201).json({ ok: true, user: safeAdmin(user) });
+});
+
+app.patch("/api/admin/users/:id", requireAdmin, (req, res) => {
+  const target = db.adminUsers.find((u) => u.id === req.params.id);
+  if (!target) return res.status(404).json({ error: "Admin not found" });
+  const b = req.body || {};
+  if (b.name === undefined && b.permissions === undefined && b.status === undefined)
+    return res.status(400).json({ error: "No fields to update" });
+  const self = req.adminUser.id === target.id;
+  const changes = [];
+
+  let name;
+  if (b.name !== undefined) {
+    name = String(b.name).trim();
+    if (name.length < 2 || name.length > 100)
+      return res.status(400).json({ error: "Invalid request body", details: { fieldErrors: { name: ["Name must be 2–100 characters"] } } });
+    if (name !== target.name) changes.push(`name → ${name}`);
+  }
+
+  let permissions;
+  if (b.permissions !== undefined) {
+    permissions = cleanPermissions(b.permissions);
+    if (!permissions || permissions.length === 0)
+      return res.status(400).json({ error: "Invalid request body", details: { fieldErrors: { permissions: ["Pick at least one dashboard tile"] } } });
+    const changed = JSON.stringify(permissions) !== JSON.stringify(target.permissions);
+    if (changed && self)
+      return res.status(400).json({ error: "You cannot change your own permissions" });
+    if (
+      changed &&
+      target.status === "Active" &&
+      target.permissions.includes("admin-users") &&
+      !permissions.includes("admin-users") &&
+      activeGatekeepers() <= 1
+    )
+      return res.status(400).json({ error: "Cannot remove the Admin Users permission from the only admin who has it" });
+    if (changed) changes.push(`tiles → ${permissions.join(", ")}`);
+  }
+
+  let status;
+  if (b.status !== undefined) {
+    status = String(b.status);
+    if (!["Active", "Disabled"].includes(status))
+      return res.status(400).json({ error: "Status must be Active or Disabled" });
+    const changed = status !== target.status;
+    if (changed && self)
+      return res.status(400).json({ error: "You cannot change your own status" });
+    if (
+      changed &&
+      status === "Disabled" &&
+      target.permissions.includes("admin-users") &&
+      activeGatekeepers() <= 1
+    )
+      return res.status(400).json({ error: "Cannot disable the only admin who can manage admin accounts" });
+    if (changed) changes.push(`status → ${status}`);
+  }
+
+  if (name !== undefined) target.name = name;
+  if (permissions !== undefined) target.permissions = permissions;
+  if (status !== undefined) target.status = status;
+  if (status === "Disabled") purgeSessions(target.id); // instant kick-out
+  if (changes.length) audit("admin-user-update", `${target.email}: ${changes.join("; ")} by ${byLine(req)}`);
+  save();
+  res.json({ ok: true, user: safeAdmin(target) });
+});
+
+app.patch("/api/admin/users/:id/password", requireAdmin, (req, res) => {
+  const target = db.adminUsers.find((u) => u.id === req.params.id);
+  if (!target) return res.status(404).json({ error: "Admin not found" });
+  if (req.adminUser.id === target.id)
+    return res.status(400).json({ error: "Use the change-password option on your own profile instead" });
+  const errors = passwordErrors(String(req.body?.password || ""));
+  if (errors.length)
+    return res.status(400).json({ error: "Invalid request body", details: { fieldErrors: { password: errors } } });
+  target.passwordHash = hashPassword(String(req.body.password));
+  purgeSessions(target.id); // they sign in fresh with the new password
+  audit("admin-user-password-reset", `${target.email} by ${byLine(req)}`);
+  save();
+  res.json({ ok: true });
+});
+
+app.delete("/api/admin/users/:id", requireAdmin, (req, res) => {
+  const target = db.adminUsers.find((u) => u.id === req.params.id);
+  if (!target) return res.status(404).json({ error: "Admin not found" });
+  if (req.adminUser.id === target.id)
+    return res.status(400).json({ error: "You cannot disable your own account" });
+  if (
+    target.status === "Active" &&
+    target.permissions.includes("admin-users") &&
+    activeGatekeepers() <= 1
+  )
+    return res.status(400).json({ error: "Cannot disable the only admin who can manage admin accounts" });
+  target.status = "Disabled";
+  purgeSessions(target.id);
+  audit("admin-user-disable", `${target.email} by ${byLine(req)}`);
+  save();
+  res.json({ ok: true });
+});
+
+app.get("/api/admin/export/admin-users.csv", (req, res) => {
+  if (!exportAuthed(req, res, "admin-users")) return;
+  const rows = [...db.adminUsers]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((u) => [u.id, u.name, u.email, u.status, u.permissions.join(", "), u.createdAt.slice(0, 10), u.lastLogin || ""]);
+  rows.push([], ["Total admins", db.adminUsers.length], ["Active", db.adminUsers.filter((u) => u.status === "Active").length]);
+  sendCsv(
+    res,
+    `dpj-admin-users-${new Date().toISOString().slice(0, 10)}.csv`,
+    ["id", "name", "email", "status", "permissions", "created", "lastLogin"],
+    rows
+  );
 });
 
 app.get("/api/admin/summary", requireAdmin, (req, res) => {
@@ -2975,7 +3349,7 @@ app.post("/api/admin/products/csv", requireAdmin, (req, res) => {
 
 // Blank template with worked examples — the starting point for new SKUs.
 app.get("/api/admin/export/template.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "catalogue")) return;
   sendCsv(res, "dpj-catalogue-template.csv", CSV_ALL_COLS, [
     // plain gold band — only the everyday fields filled in
     ["kaveri-gold-band", "Kaveri Gold Band", "rings", "gold", "22K", "yellow", 4.4, 4.2, "perGram", 760, "",
@@ -2990,7 +3364,7 @@ app.get("/api/admin/export/template.csv", (req, res) => {
 
 // Current catalogue in the SAME columns — edit in Excel, upload to update.
 app.get("/api/admin/export/catalogue.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "catalogue")) return;
   sendCsv(
     res,
     "dpj-catalogue.csv",
@@ -3489,7 +3863,7 @@ function sendCsv(res, filename, header, rows) {
 }
 
 app.get("/api/admin/export/orders.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "orders")) return;
   const rows = [...db.orders].reverse().map((o) => [
     o.orderId,
     o.placedAt,
@@ -3519,7 +3893,7 @@ app.get("/api/admin/export/orders.csv", (req, res) => {
 
 // Rate-history report — honours the console's metal and window filters.
 app.get("/api/admin/export/rates.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "rates")) return;
   const { metal, days } = req.query;
   let rows = [...db.rateAudit];
   if (metal) rows = rows.filter((h) => h.metal === metal);
@@ -3549,7 +3923,7 @@ app.get("/api/admin/export/rates.csv", (req, res) => {
 });
 
 app.get("/api/admin/export/customers.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "customers")) return;
   const dir = customerDirectory();
   const rows = dir.map((r) => [
     r.name || "",
@@ -3574,7 +3948,7 @@ app.get("/api/admin/export/customers.csv", (req, res) => {
 });
 
 app.get("/api/admin/export/schemes.csv", (req, res) => {
-  if (req.query.key !== ADMIN_KEY) return res.status(401).send("Not authorised");
+  if (!exportAuthed(req, res, "schemes")) return;
   sendCsv(
     res,
     "dpj-schemes.csv",
