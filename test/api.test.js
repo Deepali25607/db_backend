@@ -895,15 +895,25 @@ test("company name and hero wording are admin-editable with defaults on clear", 
   assert.equal(long.status, 400);
   assert.match(long.data.error, /30 characters/);
 
-  // clearing restores the house default wording
+  // clearing: the company name restores its default (the header needs one),
+  // but hero wording saved blank STAYS blank — a words-free hero is allowed
   await api("/api/admin/content", {
     method: "PATCH", headers: ADMIN,
     body: JSON.stringify({ companyName: "", heroLine1: "", heroSub: "" }),
   });
   const restored = (await api("/api/content")).data;
   assert.equal(restored.companyName, "DP Jewellers");
-  assert.equal(restored.heroLine1, "Light,");
-  assert.match(restored.heroSub, /three generations/);
+  assert.equal(restored.heroLine1, "");
+  assert.equal(restored.heroSub, "");
+
+  // put the wording back so later tests see the house copy
+  await api("/api/admin/content", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      heroLine1: "Light,",
+      heroSub: "Hand-set diamonds and 22K gold, priced live on today's rate and composed by our atelier — three generations in the making.",
+    }),
+  });
 });
 
 test("order thresholds gate checkout (min value and min quantity)", async () => {

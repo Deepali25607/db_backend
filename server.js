@@ -1731,9 +1731,11 @@ const CONTENT_TEXT_LIMITS = {
 };
 // fields where empty means "hidden/off", not "restore the house default"
 // (heroImage may stay blank — e.g. when a video is the hero — the storefront
-// falls back to its built-in image only if the video is also unset)
+// falls back to its built-in image only if the video is also unset; hero
+// wording saved blank simply doesn't render, so a media-only hero is possible)
 const CONTENT_BLANK_OK = new Set([
   "heroImage", "heroVideo", "backgroundImage", "headerBgImage", "footerBgImage",
+  "heroEyebrow", "heroLine1", "heroLine2", "heroLine3", "heroSub",
   "supportPhone", "supportWhatsapp", "supportEmail", "supportMessage",
   "returnPolicyMessage",
 ]);
