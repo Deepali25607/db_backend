@@ -545,6 +545,46 @@ test("gold scheme: pending until first instalment; activation anchors the cycle 
   assert.equal(pay.data.overdue, false);
 });
 
+test("category banners: independent of product listings, blank restores default", async () => {
+  const before = (await api("/api/categories")).data;
+  const rings = before.find((c) => c.key === "rings");
+  assert.equal(rings.custom, false);
+  const listingBefore = (await api("/api/products?category=rings")).data;
+
+  // set a custom banner — category image changes, product listings do not
+  const set = await api("/api/admin/categories", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ key: "rings", image: "/api/uploads/rings-banner-test.png" }),
+  });
+  assert.equal(set.status, 200);
+  const afterSet = (await api("/api/categories")).data.find((c) => c.key === "rings");
+  assert.equal(afterSet.image, "/api/uploads/rings-banner-test.png");
+  assert.equal(afterSet.custom, true);
+  const listingAfter = (await api("/api/products?category=rings")).data;
+  assert.equal(listingAfter.total, listingBefore.total);
+  assert.deepEqual(listingAfter.items.map((p) => p.slug), listingBefore.items.map((p) => p.slug));
+  // the mega-menu serves the same override
+  const menuRings = (await api("/api/menu")).data.menu.find((c) => c.key === "rings");
+  assert.equal(menuRings.image, "/api/uploads/rings-banner-test.png");
+
+  // unknown category and junk URLs are refused
+  assert.equal((await api("/api/admin/categories", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ key: "tiaras", image: "/x.png" }),
+  })).status, 400);
+  assert.equal((await api("/api/admin/categories", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ key: "rings", image: "javascript:alert(1)" }),
+  })).status, 400);
+
+  // blank restores the house default
+  const clear = await api("/api/admin/categories", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ key: "rings", image: "" }),
+  });
+  assert.equal(clear.status, 200);
+  const restored = (await api("/api/categories")).data.find((c) => c.key === "rings");
+  assert.equal(restored.image, rings.image);
+  assert.equal(restored.custom, false);
+});
+
 test("rate console: instant mode + all-gold-purities update (single-operator manual publishing)", async () => {
   const before = await api("/api/admin/rates", { headers: ADMIN });
   assert.equal(before.data.makerChecker, true);

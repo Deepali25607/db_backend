@@ -842,13 +842,44 @@ app.get("/api/rates", (req, res) =>
   res.json({ rates: db.rates, updatedAt: db.ratesUpdatedAt })
 );
 
+// Per-category promotional banner overrides (Admin → Settings → Category
+// banners). Stored on their own key so the picture and the product listings
+// are fully independent — swapping one never touches the other; a blank
+// override falls back to the built-in house image.
+if (!db.categoryMedia || typeof db.categoryMedia !== "object" || Array.isArray(db.categoryMedia))
+  db.categoryMedia = {};
+const catImage = (c) => db.categoryMedia[c.key] || c.image;
+
 app.get("/api/categories", (req, res) => {
   res.json(
     categories.map((c) => ({
       ...c,
+      image: catImage(c),
+      custom: Boolean(db.categoryMedia[c.key]),
       count: published().filter((p) => p.category === c.key).length,
     }))
   );
+});
+
+app.patch("/api/admin/categories", requireAdmin, (req, res) => {
+  const { key, image } = req.body || {};
+  const cat = categories.find((c) => c.key === key);
+  if (!cat) return res.status(400).json({ error: "Unknown category." });
+  const url = String(image || "").trim();
+  if (url && !/^(\/|https?:\/\/)/.test(url))
+    return res.status(400).json({ error: "The banner must be an upload or an http(s) URL." });
+  if (url) db.categoryMedia[cat.key] = url;
+  else delete db.categoryMedia[cat.key];
+  audit("categories", `${cat.label} banner ${url ? "updated" : "restored to the house default"}`);
+  save();
+  res.json({
+    ok: true,
+    categories: categories.map((c) => ({
+      ...c,
+      image: catImage(c),
+      custom: Boolean(db.categoryMedia[c.key]),
+    })),
+  });
 });
 
 // Mega-menu data (storefront header): live design counts, occasion splits
@@ -874,7 +905,7 @@ app.get("/api/menu", (req, res) => {
       return {
         key: c.key,
         label: c.label,
-        image: c.image,
+        image: catImage(c),
         tagline: c.tagline,
         count: items.length,
         occasions: Object.entries(occCount)
@@ -1578,7 +1609,7 @@ const ADMIN_ROUTE_TILES = [
   [/^\/enquiries/, "enquiries"],
   [/^\/notifications/, "notifications"],
   [/^\/(summary|abandoned|analytics|audit)/, "dashboard"],
-  [/^\/(config|content|stores|emi-plans|discount-rules|backup)/, "settings"],
+  [/^\/(config|content|stores|emi-plans|discount-rules|backup|categories)/, "settings"],
   [/^\/users/, "admin-users"],
 ];
 function tileForAdminPath(path) {
