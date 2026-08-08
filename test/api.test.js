@@ -642,6 +642,48 @@ test("PDP customisation: karat, diamond quality and size re-derive the price ser
   assert.equal(refused.status, 400);
 });
 
+test("size weight scaling is configurable per category (Settings)", async () => {
+  const base = (await api("/api/products/aurelia-solitaire-ring")).data;
+  assert.equal(base.customization.sizeStepPct, 2); // house default
+
+  // rings step to 4%: size 18 (three steps up from base 12) now carries +12%
+  const set = await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ sizeStepPcts: { rings: 4 } }),
+  });
+  assert.equal(set.status, 200);
+  const q = (await api("/api/products/aurelia-solitaire-ring/quote?size=18")).data;
+  assert.equal(q.netWeight, Math.round(base.product.metal.netWeight * 1.12 * 1000) / 1000);
+  assert.equal((await api("/api/products/aurelia-solitaire-ring")).data.customization.sizeStepPct, 4);
+
+  // other categories keep the default — a bangle still scales at 2%
+  const bangle = (await api("/api/products?category=bangles&limit=5")).data.items.find((p) => (p.sizes || []).length > 1);
+  if (bangle)
+    assert.equal((await api(`/api/products/${bangle.slug}`)).data.customization.sizeStepPct, 2);
+
+  // 0 disables size-based pricing for the category entirely
+  await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ sizeStepPcts: { rings: 0 } }),
+  });
+  const q0 = (await api("/api/products/aurelia-solitaire-ring/quote?size=18")).data;
+  assert.equal(q0.price.total, base.product.price.total);
+  assert.equal(q0.netWeight, base.product.metal.netWeight);
+
+  // guard rails: unknown category and out-of-range percent are refused
+  assert.equal((await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ sizeStepPcts: { tiaras: 2 } }),
+  })).status, 400);
+  assert.equal((await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ sizeStepPcts: { rings: 11 } }),
+  })).status, 400);
+
+  // restore the house default for the rest of the suite
+  const reset = await api("/api/admin/config", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ sizeStepPcts: {} }),
+  });
+  assert.equal(reset.status, 200);
+  assert.equal((await api("/api/products/aurelia-solitaire-ring")).data.customization.sizeStepPct, 2);
+});
+
 test("admin product CRUD: create with quality-band stone, full edit, hard delete", async () => {
   // CREATE — clarity/colour anchor the customisable diamond band
   const created = await api("/api/admin/products", {

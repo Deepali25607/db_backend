@@ -71,6 +71,9 @@ const DEFAULT_CONFIG = {
   verificationThreshold: 150000, // orders at/above get a verification call hold (FR-OMS-03/04)
   lowStockThreshold: 3,
   storeName: "DP Jewellers",
+  // Size customisation: % of metal weight one size step adds/removes, per
+  // category ({rings: 2.5, ...}); categories absent here use the 2% default.
+  sizeStepPcts: {},
 };
 const config = Object.assign({}, DEFAULT_CONFIG, db.config || {});
 db.config = config;
@@ -249,7 +252,15 @@ const DIAMOND_QUALITIES = [
   { key: "VS-GH", label: "VS GH", factor: 0.88 },
   { key: "VVS-EF", label: "VVS EF", factor: 1 },
 ];
-const SIZE_WEIGHT_STEP_PCT = 2; // each size step up/down moves metal weight this %
+const SIZE_WEIGHT_STEP_PCT = 2; // default %/size-step when a category has no override
+
+// Admin → Settings → Size & weight scaling: per-category override of how
+// much metal weight one size step adds/removes (0 = size never moves the
+// price for that category).
+function stepPctFor(product) {
+  const v = Number(config.sizeStepPcts?.[product.category]);
+  return Number.isFinite(v) && v >= 0 ? v : SIZE_WEIGHT_STEP_PCT;
+}
 
 // The catalogued clarity/colour anchor the piece to one of the four bands;
 // its catalogued ratePerCarat is the price OF that band.
@@ -290,7 +301,7 @@ function productCustomization(product) {
         }
       : null,
     baseSize: baseSizeOf(product),
-    sizeStepPct: sizes.length > 1 ? SIZE_WEIGHT_STEP_PCT : 0,
+    sizeStepPct: sizes.length > 1 ? stepPctFor(product) : 0,
   };
 }
 
@@ -335,8 +346,9 @@ function applyVariant(product, item = {}) {
     if (!product.sizes.includes(size))
       throw httpError(400, `${product.name} is not available in ${(product.sizeLabel || "size").toLowerCase()} ${size}.`);
     const steps = product.sizes.indexOf(size) - product.sizes.indexOf(baseSizeOf(product));
-    if (steps !== 0) {
-      const f = 1 + (steps * SIZE_WEIGHT_STEP_PCT) / 100;
+    const stepPct = stepPctFor(product);
+    if (steps !== 0 && stepPct > 0) {
+      const f = 1 + (steps * stepPct) / 100;
       derived = {
         ...derived,
         metal: {
@@ -1876,6 +1888,24 @@ app.patch("/api/admin/config", requireAdmin, (req, res) => {
       if (config[key] !== value) changes.push({ key, from: config[key], to: value });
       continue;
     }
+    // Size & weight scaling: {category: %/step}, 0–10, decimals allowed;
+    // 0 turns size-based pricing off for that category. Absent = 2% default.
+    if (key === "sizeStepPcts") {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+        return res.status(400).json({ error: "sizeStepPcts must be an object of {category: percent}." });
+      const value = {};
+      for (const [cat, pctRaw] of Object.entries(raw)) {
+        if (!categories.some((c) => c.key === cat))
+          return res.status(400).json({ error: `Unknown category "${cat}".` });
+        const pct = Number(pctRaw);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 10)
+          return res.status(400).json({ error: `Weight step for ${cat} must be between 0 and 10 % per size step.` });
+        value[cat] = Math.round(pct * 10) / 10;
+      }
+      if (JSON.stringify(config.sizeStepPcts || {}) !== JSON.stringify(value))
+        changes.push({ key, from: config.sizeStepPcts, to: value });
+      continue;
+    }
     const field = CONFIG_FIELDS.find((f) => f.key === key);
     if (!field) return res.status(400).json({ error: `"${key}" is not an editable setting.` });
     const value = Number(raw);
@@ -1887,7 +1917,8 @@ app.patch("/api/admin/config", requireAdmin, (req, res) => {
   }
   if (changes.length === 0) return res.json({ ok: true, config, changed: 0 });
   for (const c of changes) config[c.key] = c.to;
-  audit("settings", changes.map((c) => `${c.key}: ${c.from} → ${c.to}`).join(", "));
+  const show = (v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v);
+  audit("settings", changes.map((c) => `${c.key}: ${show(c.from)} → ${show(c.to)}`).join(", "));
   save();
   res.json({ ok: true, config, changed: changes.length });
 });
