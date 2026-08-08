@@ -1799,6 +1799,19 @@ app.get("/api/content", (req, res) => res.json(db.content));
 // under backend/uploads and served at /api/uploads/... (rides the dev proxy).
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Brand media committed to the repo (seed-media/) is copied into the uploads
+// store on every boot — hosts with ephemeral disks (Render free tier) wipe
+// uploads/ on each restart, so these stable-named files are the only media
+// URLs that survive unconditionally. Existing files are never overwritten,
+// so an admin can replace one via the upload endpoint until the next restart.
+const SEED_MEDIA_DIR = path.join(__dirname, "seed-media");
+if (fs.existsSync(SEED_MEDIA_DIR)) {
+  for (const f of fs.readdirSync(SEED_MEDIA_DIR)) {
+    const dest = path.join(UPLOAD_DIR, f);
+    if (!fs.existsSync(dest)) fs.copyFileSync(path.join(SEED_MEDIA_DIR, f), dest);
+  }
+}
 const UPLOAD_TYPES = {
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
   ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
