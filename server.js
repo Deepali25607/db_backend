@@ -3224,6 +3224,39 @@ function cleanOccasions(list) {
   return tags.length ? tags : null;
 }
 
+// Stone payload → catalogue stone. clarity + colour matter beyond display:
+// they anchor the diamond quality band (SI IJ / SI GH / VS GH / VVS EF) the
+// PDP customisation engine re-prices from — the catalogued ratePerCarat IS
+// the price of that band.
+function parseStone(st) {
+  const carat = Number(st.caratTotal), perCarat = Number(st.ratePerCarat);
+  if (!st.type || !(carat > 0) || !(perCarat > 0))
+    throw httpError(400, "A stone needs a type, carat > 0 and rate per carat > 0.");
+  const stone = {
+    type: String(st.type).trim().toLowerCase(),
+    caratTotal: carat,
+    ratePerCarat: perCarat,
+  };
+  if (st.count && Number(st.count) > 0) stone.count = Math.round(Number(st.count));
+  if (st.clarity) {
+    const c = String(st.clarity).trim().toUpperCase().slice(0, 6);
+    if (!/^(FL|IF|VVS[12]?|VS[12]?|SI[12]?|I[123])$/.test(c))
+      throw httpError(400, `Clarity "${st.clarity}" isn't a standard grade (FL, IF, VVS1-2, VS1-2, SI1-2, I1-3).`);
+    stone.clarity = c;
+  }
+  if (st.colour) {
+    const c = String(st.colour).trim().toUpperCase().slice(0, 1);
+    if (!/^[D-M]$/.test(c))
+      throw httpError(400, `Diamond colour is a letter D–M, not "${st.colour}".`);
+    stone.colour = c;
+  }
+  if (st.cut) stone.cut = String(st.cut).trim().slice(0, 40);
+  if (st.setting) stone.setting = String(st.setting).trim().slice(0, 40);
+  if (st.certBody) stone.certBody = String(st.certBody);
+  if (st.certNo) stone.certNo = String(st.certNo);
+  return stone;
+}
+
 // Create a single product from the admin form (FR-ADM-03 / FR-CAT).
 app.post("/api/admin/products", requireAdmin, (req, res) => {
   const b = req.body || {};
@@ -3266,12 +3299,11 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   let stones = [];
   const st = b.stone || {};
   if (st.type || st.caratTotal || st.ratePerCarat) {
-    const carat = Number(st.caratTotal), perCarat = Number(st.ratePerCarat);
-    if (!st.type || !(carat > 0) || !(perCarat > 0))
-      return res.status(400).json({ error: "A stone needs a type, carat > 0 and rate per carat > 0." });
-    stones = [{ type: String(st.type), caratTotal: carat, ratePerCarat: perCarat }];
-    if (st.certBody) stones[0].certBody = String(st.certBody);
-    if (st.certNo) stones[0].certNo = String(st.certNo);
+    try {
+      stones = [parseStone(st)];
+    } catch (e) {
+      return res.status(e.status || 400).json({ error: e.message });
+    }
   }
 
   const hallmarking = b.hallmarkingCharge === undefined || b.hallmarkingCharge === "" ? 45 : Number(b.hallmarkingCharge);
@@ -3333,12 +3365,124 @@ app.post("/api/admin/products", requireAdmin, (req, res) => {
   res.status(201).json({ ok: true, slug, price: priceOf(product).total });
 });
 
+// Raw product for the admin edit form — unpublished pieces included, no
+// pricing spin (the form needs stored fields, not derived ones).
+app.get("/api/admin/products/:slug", requireAdmin, (req, res) => {
+  const product = products.find((p) => p.slug === req.params.slug);
+  if (!product) return res.status(404).json({ error: "Product not found" });
+  res.json({ product, price: priceOf(product) });
+});
+
+// Hard delete. Order lines carry their own name/image/price snapshots, so
+// history and invoices stay intact; carts and wishlists already tolerate a
+// missing slug. Unpublish remains the soft alternative.
+app.delete("/api/admin/products/:slug", requireAdmin, (req, res) => {
+  const idx = products.findIndex((p) => p.slug === req.params.slug);
+  if (idx === -1) return res.status(404).json({ error: "Product not found" });
+  const [gone] = products.splice(idx, 1);
+  if (db.reviews) delete db.reviews[gone.slug];
+  audit("catalogue", `${gone.slug} deleted (${gone.name})`);
+  save();
+  res.json({ ok: true, slug: gone.slug });
+});
+
 app.patch("/api/admin/products/:slug", requireAdmin, (req, res) => {
   const product = products.find((p) => p.slug === req.params.slug);
   if (!product) return res.status(404).json({ error: "Product not found" });
   const body = req.body || {};
   if (typeof body.published === "boolean") product.published = body.published;
   if (typeof body.featured === "boolean") product.featured = body.featured;
+
+  // ---- full-field updates (admin edit form; slug itself is immutable) ----
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name) return res.status(400).json({ error: "A piece cannot be nameless." });
+    product.name = name;
+  }
+  if (body.category !== undefined) {
+    if (!categories.some((c) => c.key === body.category))
+      return res.status(400).json({ error: "Choose a valid category." });
+    product.category = body.category;
+  }
+  if (body.metalType !== undefined || body.purity !== undefined) {
+    const metalType = body.metalType ?? product.metal.type;
+    const purity = body.purity ?? product.metal.purity;
+    if (db.rates[metalType]?.[purity] === undefined)
+      return res.status(400).json({ error: `No rate configured for ${metalType} ${purity}.` });
+    product.metal.type = metalType;
+    product.metal.purity = purity;
+  }
+  if (body.colour !== undefined) product.metal.colour = String(body.colour) || "yellow";
+  if (body.grossWeight !== undefined || body.netWeight !== undefined) {
+    const gw = body.grossWeight !== undefined ? Number(body.grossWeight) : product.metal.grossWeight;
+    const nw = body.netWeight !== undefined ? Number(body.netWeight) : product.metal.netWeight;
+    if (!(gw > 0) || !(nw > 0) || nw > gw)
+      return res.status(400).json({ error: "Weights must be positive, with net ≤ gross." });
+    product.metal.grossWeight = gw;
+    product.metal.netWeight = nw;
+  }
+  if (body.stone !== undefined) {
+    // null clears the stone; an object replaces it (clarity/colour re-anchor
+    // the diamond customisation band)
+    if (body.stone === null) product.stones = [];
+    else {
+      try {
+        product.stones = [parseStone(body.stone)];
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.message });
+      }
+    }
+  }
+  if (body.sizes !== undefined) {
+    const sizes = (Array.isArray(body.sizes) ? body.sizes : String(body.sizes).split(","))
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+    product.sizes = sizes;
+    if (!sizes.length) product.sizeLabel = null;
+    else if (!product.sizeLabel) product.sizeLabel = "Size";
+  }
+  if (body.sizeLabel !== undefined && (product.sizes || []).length)
+    product.sizeLabel = String(body.sizeLabel).trim() || "Size";
+  if (body.hallmarkingCharge !== undefined || body.certificationCharge !== undefined) {
+    const hallmarking =
+      body.hallmarkingCharge !== undefined ? Number(body.hallmarkingCharge) : product.otherCharges?.hallmarking ?? 45;
+    const certification =
+      body.certificationCharge !== undefined ? Number(body.certificationCharge) : product.otherCharges?.certification ?? 0;
+    if (!(hallmarking >= 0) || !(certification >= 0))
+      return res.status(400).json({ error: "Hallmarking/certification charges must be numbers ≥ 0." });
+    product.otherCharges = certification > 0 ? { hallmarking, certification } : { hallmarking };
+  }
+  if (body.description !== undefined) {
+    const d = String(body.description).trim();
+    if (!d) return res.status(400).json({ error: "Description cannot be blank." });
+    product.description = d;
+  }
+  if (body.collection !== undefined) product.collection = String(body.collection).trim() || "Atelier";
+  if (body.gender !== undefined) {
+    if (!["women", "men", "unisex"].includes(body.gender))
+      return res.status(400).json({ error: "Gender must be women, men or unisex." });
+    product.gender = body.gender;
+  }
+  if (body.engravable !== undefined) product.engravable = !!body.engravable;
+  if (body.leadTimeDays !== undefined) {
+    const lt = Number(body.leadTimeDays);
+    if (!Number.isInteger(lt) || lt < 0 || lt > 90)
+      return res.status(400).json({ error: "Lead time must be a whole number of days, 0–90." });
+    product.leadTimeDays = lt;
+    product.madeToOrder = body.madeToOrder !== undefined ? !!body.madeToOrder : lt > 0;
+  } else if (body.madeToOrder !== undefined) product.madeToOrder = !!body.madeToOrder;
+  if (body.huid !== undefined) {
+    const huid = String(body.huid).trim().toUpperCase();
+    if (huid && !/^[A-Z0-9]{6}$/.test(huid))
+      return res.status(400).json({ error: "HUID must be exactly 6 letters/digits." });
+    if (huid) product.huid = huid;
+  }
+  if (body.hsn !== undefined) {
+    const hsn = String(body.hsn).trim();
+    if (hsn && !/^\d{4,8}$/.test(hsn))
+      return res.status(400).json({ error: "HSN must be 4–8 digits." });
+    if (hsn) product.hsn = hsn;
+  }
   if (body.making) {
     const { basis, value } = body.making;
     if (!["perGram", "percent", "flat"].includes(basis) || !(Number(value) > 0))

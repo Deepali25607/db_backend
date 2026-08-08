@@ -642,6 +642,70 @@ test("PDP customisation: karat, diamond quality and size re-derive the price ser
   assert.equal(refused.status, 400);
 });
 
+test("admin product CRUD: create with quality-band stone, full edit, hard delete", async () => {
+  // CREATE — clarity/colour anchor the customisable diamond band
+  const created = await api("/api/admin/products", {
+    method: "POST", headers: ADMIN,
+    body: JSON.stringify({
+      name: "Crud Test Solitaire", slug: "crud-test-solitaire", category: "rings",
+      metalType: "gold", purity: "22K", colour: "rose",
+      grossWeight: 5, netWeight: 4.2,
+      making: { basis: "percent", value: 14 },
+      sizes: "10,12,14", sizeLabel: "Ring size", stock: 3,
+      stone: { type: "diamond", caratTotal: 0.4, ratePerCarat: 150000, clarity: "SI1", colour: "I" },
+    }),
+  });
+  assert.equal(created.status, 201);
+
+  const pdp = (await api("/api/products/crud-test-solitaire")).data;
+  assert.equal(pdp.customization.diamond.base, "SI-IJ"); // SI1 + I → entry band
+  assert.equal(pdp.customization.baseSize, "12");
+  assert.equal(pdp.product.metal.purity, "22K");
+
+  // READ (admin raw — includes stored stone grading)
+  const raw = (await api("/api/admin/products/crud-test-solitaire", { headers: ADMIN })).data;
+  assert.equal(raw.product.stones[0].clarity, "SI1");
+
+  // UPDATE — re-anchor the band, change karat, name and weights
+  const patched = await api("/api/admin/products/crud-test-solitaire", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({
+      name: "Crud Test Solitaire II", purity: "18K", netWeight: 4.5, grossWeight: 5.2,
+      stone: { type: "diamond", caratTotal: 0.4, ratePerCarat: 190000, clarity: "VVS1", colour: "E" },
+      sizes: "8,10,12,14,16",
+    }),
+  });
+  assert.equal(patched.status, 200);
+  const after = (await api("/api/products/crud-test-solitaire")).data;
+  assert.equal(after.product.name, "Crud Test Solitaire II");
+  assert.equal(after.product.metal.purity, "18K");
+  assert.equal(after.customization.diamond.base, "VVS-EF");
+  assert.equal(after.customization.baseSize, "12"); // middle of the five sizes
+  assert.equal(after.product.price.stoneValue, Math.round(0.4 * 190000));
+
+  // bad grades and impossible weights are refused
+  assert.equal((await api("/api/admin/products/crud-test-solitaire", {
+    method: "PATCH", headers: ADMIN,
+    body: JSON.stringify({ stone: { type: "diamond", caratTotal: 0.4, ratePerCarat: 1000, clarity: "XX9" } }),
+  })).status, 400);
+  assert.equal((await api("/api/admin/products/crud-test-solitaire", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ netWeight: 9, grossWeight: 5 }),
+  })).status, 400);
+
+  // clearing the stone removes the diamond customisation entirely
+  const cleared = await api("/api/admin/products/crud-test-solitaire", {
+    method: "PATCH", headers: ADMIN, body: JSON.stringify({ stone: null }),
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal((await api("/api/products/crud-test-solitaire")).data.customization.diamond, null);
+
+  // DELETE — gone from the storefront, idempotence refused with 404
+  const del = await api("/api/admin/products/crud-test-solitaire", { method: "DELETE", headers: ADMIN });
+  assert.equal(del.status, 200);
+  assert.equal((await api("/api/products/crud-test-solitaire")).status, 404);
+  assert.equal((await api("/api/admin/products/crud-test-solitaire", { method: "DELETE", headers: ADMIN })).status, 404);
+});
+
 test("rate console: instant mode + all-gold-purities update (single-operator manual publishing)", async () => {
   const before = await api("/api/admin/rates", { headers: ADMIN });
   assert.equal(before.data.makerChecker, true);
