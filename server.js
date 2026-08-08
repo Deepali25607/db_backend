@@ -2796,11 +2796,23 @@ function schemeView(s) {
   const paid = s.instalments.length;
   const totalPaid = s.instalments.reduce((a, i) => a + i.amount, 0);
   const grams = s.instalments.reduce((a, i) => a + i.grams, 0);
-  const start = new Date(s.startedAt);
-  const nextDue = new Date(start);
-  nextDue.setMonth(start.getMonth() + paid);
-  const maturity = new Date(start);
-  maturity.setMonth(start.getMonth() + variant.tenureMonths);
+  // The payment cycle anchors on the FIRST successful instalment, not the
+  // enrolment moment — a scheme still awaiting activation has no due date.
+  let nextDueAt = null;
+  let maturityAt = null;
+  let overdue = false;
+  if (s.startedAt) {
+    const start = new Date(s.startedAt);
+    const maturity = new Date(start);
+    maturity.setMonth(start.getMonth() + variant.tenureMonths);
+    maturityAt = maturity.toISOString();
+    if (s.status === "active") {
+      const nextDue = new Date(start);
+      nextDue.setMonth(start.getMonth() + paid);
+      nextDueAt = nextDue.toISOString();
+      overdue = nextDue.getTime() < Date.now();
+    }
+  }
   return {
     id: s.id,
     variant: s.variant,
@@ -2809,14 +2821,22 @@ function schemeView(s) {
     monthlyAmount: s.monthlyAmount,
     tenureMonths: variant.tenureMonths,
     status: s.status,
-    startedAt: s.startedAt,
+    displayStatus: s.status === "active" && overdue ? "overdue" : s.status,
+    overdue,
+    startedAt: s.startedAt || null,
+    enrolledAt: s.enrolledAt || s.startedAt || null,
     paidCount: paid,
+    remainingCount: Math.max(0, variant.tenureMonths - paid),
     totalPaid,
     gramsAccrued: Number(grams.toFixed(3)),
     currentValue: Math.round(grams * rate22),
     rate22,
-    nextDueAt: s.status === "active" ? nextDue.toISOString() : null,
-    maturityAt: maturity.toISOString(),
+    nextDueAt,
+    maturityAt,
+    instalments: s.instalments.map((i) => ({
+      no: i.no, amount: i.amount, paidAt: i.paidAt, rate22K: i.rate22K, grams: i.grams,
+      method: i.method || null,
+    })),
     redemption: s.redemption || null,
   };
 }
@@ -2840,6 +2860,8 @@ app.post("/api/schemes/enroll", (req, res) => {
       return res.status(400).json({ error: "PAN is required for this committed value (KYC)." });
   }
 
+  // Enrolment reserves the scheme; it activates — and the monthly cycle
+  // anchors — only when the FIRST instalment is paid successfully.
   const scheme = {
     id: newId("GSS"),
     variant: v.key,
@@ -2851,15 +2873,16 @@ app.post("/api/schemes/enroll", (req, res) => {
       pan: customer.pan ? String(customer.pan).toUpperCase() : null,
     },
     termsAcceptedAt: new Date().toISOString(),
-    startedAt: new Date().toISOString(),
-    status: "active",
+    enrolledAt: new Date().toISOString(),
+    startedAt: null,
+    status: "pending",
     instalments: [],
   };
   db.schemes.push(scheme);
   notify(
     scheme.customer.phone,
     "scheme",
-    `Welcome to ${v.name}! Scheme ${scheme.id} is active at ₹${scheme.monthlyAmount.toLocaleString("en-IN")}/month. Each instalment converts to grams at the day's 22K rate.`
+    `Welcome to ${v.name}! Pay the first instalment of ₹${scheme.monthlyAmount.toLocaleString("en-IN")} to activate scheme ${scheme.id} — every instalment converts to grams at that day's 22K rate.`
   );
   save();
   res.status(201).json(schemeView(scheme));
@@ -2875,7 +2898,7 @@ app.get("/api/schemes/my", (req, res) => {
 app.post("/api/schemes/:id/pay", (req, res) => {
   const scheme = db.schemes.find((s) => s.id === req.params.id);
   if (!scheme) return res.status(404).json({ error: "Scheme not found" });
-  if (scheme.status !== "active")
+  if (scheme.status !== "active" && scheme.status !== "pending")
     return res.status(400).json({ error: `This scheme is ${scheme.status}.` });
 
   if (req.body?.outcome !== "success")
@@ -2883,12 +2906,20 @@ app.post("/api/schemes/:id/pay", (req, res) => {
 
   const variant = db.schemeVariants.find((v) => v.key === scheme.variant);
   const rate = db.rates.gold["22K"];
+  const method = ["card", "upi", "netbanking"].includes(req.body?.method) ? req.body.method : null;
+  const first = scheme.instalments.length === 0;
+  if (first) {
+    // first successful payment activates the scheme and anchors the cycle
+    scheme.startedAt = new Date().toISOString();
+    scheme.status = "active";
+  }
   scheme.instalments.push({
     no: scheme.instalments.length + 1,
     amount: scheme.monthlyAmount,
     paidAt: new Date().toISOString(),
     rate22K: rate,
     grams: Number((scheme.monthlyAmount / rate).toFixed(4)),
+    method,
   });
   if (scheme.instalments.length >= variant.tenureMonths) scheme.status = "matured";
   const paid = scheme.instalments[scheme.instalments.length - 1];
@@ -2897,7 +2928,9 @@ app.post("/api/schemes/:id/pay", (req, res) => {
     "scheme",
     scheme.status === "matured"
       ? `Final instalment received — scheme ${scheme.id} has matured! Visit the Gold Scheme page to redeem your accrued grams. ${variant.bonus}.`
-      : `Instalment ${paid.no}/${variant.tenureMonths} of ₹${paid.amount.toLocaleString("en-IN")} received on scheme ${scheme.id} — ${paid.grams} g added at ₹${paid.rate22K.toLocaleString("en-IN")}/g.`
+      : first
+        ? `Scheme ${scheme.id} is now ACTIVE — first instalment of ₹${paid.amount.toLocaleString("en-IN")} converted to ${paid.grams} g at ₹${paid.rate22K.toLocaleString("en-IN")}/g. Next instalment due ${new Date(schemeView(scheme).nextDueAt).toLocaleDateString("en-IN")}.`
+        : `Instalment ${paid.no}/${variant.tenureMonths} of ₹${paid.amount.toLocaleString("en-IN")} received on scheme ${scheme.id} — ${paid.grams} g added at ₹${paid.rate22K.toLocaleString("en-IN")}/g.`
   );
   save();
   res.json(schemeView(scheme));
@@ -2962,6 +2995,7 @@ app.get("/api/admin/schemes", requireAdmin, (req, res) => {
     totals: {
       enrolments: views.length,
       active: views.filter((v) => v.status === "active").length,
+      awaitingFirstPayment: views.filter((v) => v.status === "pending").length,
       collected: views.reduce((a, v) => a + v.totalPaid, 0),
       gramsLiability: Number(views.reduce((a, v) => a + (v.status !== "redeemed" ? v.gramsAccrued : 0), 0).toFixed(3)),
       valueLiability: views.reduce((a, v) => a + (v.status !== "redeemed" ? v.currentValue : 0), 0),

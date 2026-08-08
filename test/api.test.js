@@ -504,7 +504,7 @@ test("security headers are present", async () => {
   assert.equal(res.headers.get("x-frame-options"), "DENY");
 });
 
-test("gold scheme accrues grams at the day's 22K rate (FR-GSS)", async () => {
+test("gold scheme: pending until first instalment; activation anchors the cycle (FR-GSS)", async () => {
   const enroll = await api("/api/schemes/enroll", {
     method: "POST", headers: JSONH,
     body: JSON.stringify({
@@ -513,12 +513,36 @@ test("gold scheme accrues grams at the day's 22K rate (FR-GSS)", async () => {
     }),
   });
   assert.equal(enroll.status, 201);
+  // enrolment alone does NOT activate — no due date, no grams
+  assert.equal(enroll.data.status, "pending");
+  assert.equal(enroll.data.startedAt, null);
+  assert.equal(enroll.data.nextDueAt, null);
+
+  // a failed gateway leaves it pending
+  const fail = await api(`/api/schemes/${enroll.data.id}/pay`, {
+    method: "POST", headers: JSONH, body: JSON.stringify({ outcome: "failure" }),
+  });
+  assert.equal(fail.status, 402);
+
+  // first successful payment activates and converts at the day's 22K rate
   const pay = await api(`/api/schemes/${enroll.data.id}/pay`, {
-    method: "POST", headers: JSONH, body: JSON.stringify({ outcome: "success" }),
+    method: "POST", headers: JSONH, body: JSON.stringify({ outcome: "success", method: "upi" }),
   });
   assert.equal(pay.status, 200);
+  assert.equal(pay.data.status, "active");
   assert.equal(pay.data.paidCount, 1);
+  assert.equal(pay.data.remainingCount, pay.data.tenureMonths - 1);
   assert.ok(Math.abs(pay.data.gramsAccrued - 5000 / pay.data.rate22) < 0.001);
+  // payment history carries the method and per-payment rate
+  assert.equal(pay.data.instalments.length, 1);
+  assert.equal(pay.data.instalments[0].method, "upi");
+  assert.equal(pay.data.instalments[0].rate22K, pay.data.rate22);
+  // next due = one month after the FIRST PAYMENT date
+  const start = new Date(pay.data.startedAt);
+  const expected = new Date(start);
+  expected.setMonth(start.getMonth() + 1);
+  assert.equal(pay.data.nextDueAt.slice(0, 10), expected.toISOString().slice(0, 10));
+  assert.equal(pay.data.overdue, false);
 });
 
 test("rate console: instant mode + all-gold-purities update (single-operator manual publishing)", async () => {
@@ -1619,6 +1643,11 @@ test("discount rules engine: conditions, priority, making target, audiences", as
     body: JSON.stringify({ variant: "flexi-24", monthlyAmount: 1500, acceptTerms: true, customer: { name: "Scheme Buyer", phone: schemePhone } }),
   });
   assert.equal(enrolled.status, 201);
+  // audience rules need an ACTIVE scheme — pay the first instalment
+  const activate = await api(`/api/schemes/${enrolled.data.id}/pay`, {
+    method: "POST", headers: JSONH, body: JSON.stringify({ outcome: "success" }),
+  });
+  assert.equal(activate.status, 200);
   const schemeOrder = await api("/api/orders", {
     method: "POST", headers: JSONH,
     body: order([{ slug: "aurelia-solitaire-ring", qty: 1, size: "12" }], {
