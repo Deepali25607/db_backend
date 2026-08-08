@@ -239,6 +239,118 @@ function listItem(p) {
   return rest;
 }
 
+// ------------- customisation engine (Bluestone-style PDP variants) --------
+// A piece can be re-derived live in another gold karat, another diamond
+// quality band, or another size. The price is never adjusted client-side:
+// every selection re-runs the same BRD 7.2 formula on a derived product.
+const DIAMOND_QUALITIES = [
+  { key: "SI-IJ", label: "SI IJ", factor: 0.62 },
+  { key: "SI-GH", label: "SI GH", factor: 0.74 },
+  { key: "VS-GH", label: "VS GH", factor: 0.88 },
+  { key: "VVS-EF", label: "VVS EF", factor: 1 },
+];
+const SIZE_WEIGHT_STEP_PCT = 2; // each size step up/down moves metal weight this %
+
+// The catalogued clarity/colour anchor the piece to one of the four bands;
+// its catalogued ratePerCarat is the price OF that band.
+function diamondGradeOf(stone) {
+  const clarity = String(stone.clarity || "VS").toUpperCase();
+  const colour = String(stone.colour || "G").toUpperCase()[0];
+  if (/^(VVS|IF|FL)/.test(clarity)) return "VVS-EF";
+  if (clarity.startsWith("VS")) return "VS-GH";
+  return "EFGH".includes(colour) ? "SI-GH" : "SI-IJ";
+}
+
+// the catalogued weight belongs to the middle listed size
+function baseSizeOf(product) {
+  const sizes = product.sizes || [];
+  return sizes.length ? sizes[Math.floor((sizes.length - 1) / 2)] : null;
+}
+
+function productCustomization(product) {
+  const purities =
+    product.metal.type === "gold"
+      ? Object.keys(db.rates.gold || {})
+          .filter((k) => k !== "24K" && typeof db.rates.gold[k] === "number")
+          .sort((a, b) => parseInt(b) - parseInt(a))
+          .map((key) => ({ key, ratePerGram: db.rates.gold[key] }))
+      : [];
+  const diamond = (product.stones || []).find((s) => s.type === "diamond");
+  const sizes = product.sizes || [];
+  if (purities.length < 2 && !diamond && sizes.length < 2) return null;
+  return {
+    basePurity: product.metal.purity,
+    colour: product.metal.colour || null,
+    purities,
+    diamond: diamond
+      ? {
+          base: diamondGradeOf(diamond),
+          caratTotal: diamond.caratTotal,
+          options: DIAMOND_QUALITIES.map(({ key, label }) => ({ key, label })),
+        }
+      : null,
+    baseSize: baseSizeOf(product),
+    sizeStepPct: sizes.length > 1 ? SIZE_WEIGHT_STEP_PCT : 0,
+  };
+}
+
+// item {purity?, quality?, size?} → derived product + a human note like
+// "14K · VVS EF". Invalid selections are a 400, never a silent fallback —
+// an order must mean exactly what the customer saw.
+function applyVariant(product, item = {}) {
+  let derived = product;
+  const noteParts = [];
+
+  const wantPurity = item.purity ? String(item.purity).toUpperCase() : null;
+  if (wantPurity && wantPurity !== product.metal.purity) {
+    if (product.metal.type !== "gold" || wantPurity === "24K" || typeof db.rates.gold?.[wantPurity] !== "number")
+      throw httpError(400, `${product.name} is not available in ${wantPurity}.`);
+    derived = { ...derived, metal: { ...derived.metal, purity: wantPurity } };
+    noteParts.push(wantPurity);
+  }
+
+  const wantQ = item.quality ? String(item.quality).toUpperCase() : null;
+  if (wantQ) {
+    const stones = (derived.stones || []).slice();
+    const di = stones.findIndex((s) => s.type === "diamond");
+    const grade = DIAMOND_QUALITIES.find((g) => g.key === wantQ);
+    if (di === -1 || !grade)
+      throw httpError(400, `${product.name} has no ${String(item.quality).replace("-", " ")} diamond option.`);
+    const base = DIAMOND_QUALITIES.find((g) => g.key === diamondGradeOf(stones[di]));
+    if (grade.key !== base.key) {
+      const [clar, col] = grade.label.split(" ");
+      stones[di] = {
+        ...stones[di],
+        ratePerCarat: Math.round((stones[di].ratePerCarat * grade.factor) / base.factor),
+        clarity: clar,
+        colour: col,
+      };
+      derived = { ...derived, stones };
+      noteParts.push(grade.label);
+    }
+  }
+
+  if (item.size && (product.sizes || []).length > 1) {
+    const size = String(item.size);
+    if (!product.sizes.includes(size))
+      throw httpError(400, `${product.name} is not available in ${(product.sizeLabel || "size").toLowerCase()} ${size}.`);
+    const steps = product.sizes.indexOf(size) - product.sizes.indexOf(baseSizeOf(product));
+    if (steps !== 0) {
+      const f = 1 + (steps * SIZE_WEIGHT_STEP_PCT) / 100;
+      derived = {
+        ...derived,
+        metal: {
+          ...derived.metal,
+          netWeight: Math.round(derived.metal.netWeight * f * 1000) / 1000,
+          grossWeight: Math.round(derived.metal.grossWeight * f * 1000) / 1000,
+        },
+      };
+    }
+  }
+
+  return { product: derived, note: noteParts.join(" · ") || null };
+}
+
 function newId(prefix) {
   return (
     prefix +
@@ -371,12 +483,20 @@ function buildOrderDraft(body, req) {
         throw httpError(400, "Engraving may use letters, numbers, spaces and . & ' - only.");
     }
 
-    const price = priceOf(product, billingCtx);
+    // customisation (karat / diamond quality / size) re-derives the piece;
+    // the price the customer pays is computed from the derived product
+    const { product: variant, note: variantNote } = applyVariant(product, item);
+    const price = priceOf(variant, billingCtx);
     lines.push({
       slug: product.slug,
       name: product.name,
       image: product.images[0],
       size: item.size || null,
+      custom:
+        item.purity || item.quality
+          ? { purity: item.purity || null, quality: item.quality || null }
+          : null,
+      variantNote,
       engraving,
       qty,
       unitPrice: price.total,
@@ -987,7 +1107,40 @@ app.get("/api/products/:slug", (req, res) => {
     .filter((p) => p.slug !== product.slug && (p.category === product.category || p.collection === product.collection))
     .slice(0, 4)
     .map(listItem);
-  res.json({ product: priced(product), related, ratesUpdatedAt: db.ratesUpdatedAt });
+  res.json({
+    product: priced(product),
+    related,
+    customization: productCustomization(product),
+    ratesUpdatedAt: db.ratesUpdatedAt,
+  });
+});
+
+// Live variant quote — the PDP re-derives the price server-side as the
+// customer flips karat / diamond quality / size. Same formula, same
+// discount contest; the client only ever displays what this returns.
+app.get("/api/products/:slug/quote", (req, res) => {
+  const product = published().find((p) => p.slug === req.params.slug);
+  if (!product) return res.status(404).json({ error: "Product not found" });
+  try {
+    const { product: derived, note } = applyVariant(product, {
+      purity: req.query.purity || null,
+      quality: req.query.quality || null,
+      size: req.query.size || null,
+    });
+    res.json({
+      slug: product.slug,
+      note,
+      selection: {
+        purity: derived.metal.purity,
+        quality: req.query.quality ? String(req.query.quality).toUpperCase() : null,
+        size: req.query.size || null,
+      },
+      netWeight: derived.metal.netWeight,
+      price: priceOf(derived),
+    });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message });
+  }
 });
 
 app.get("/api/pincode/:pin", (req, res) => {
@@ -1432,6 +1585,7 @@ app.get("/api/orders/:orderId/invoice", (req, res) => {
       name: l.name,
       slug: l.slug,
       size: l.size,
+      variantNote: l.variantNote || null,
       engraving: l.engraving || null,
       qty: l.qty,
       hsn: l.hsn || "7113",
@@ -1507,6 +1661,7 @@ app.get("/api/orders/:orderId/packing-slip", (req, res) => {
     lines: order.lines.map((l) => ({
       name: l.name,
       size: l.size,
+      variantNote: l.variantNote || null,
       engraving: l.engraving || null,
       qty: l.qty,
       huid: l.huid || null,

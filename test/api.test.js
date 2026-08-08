@@ -585,6 +585,63 @@ test("category banners: independent of product listings, blank restores default"
   assert.equal(restored.custom, false);
 });
 
+test("PDP customisation: karat, diamond quality and size re-derive the price server-side", async () => {
+  const { data } = await api("/api/products/aurelia-solitaire-ring");
+  const base = data.product;
+  const cz = data.customization;
+  assert.ok(cz, "customisation options ship with the PDP payload");
+  assert.equal(cz.basePurity, "18K");
+  assert.deepEqual(cz.purities.map((p) => p.key), ["22K", "18K", "14K"]);
+  assert.equal(cz.diamond.base, "VS-GH"); // VS1/F anchors the catalogued per-carat rate
+  assert.equal(cz.baseSize, "12"); // catalogued weight belongs to the middle size
+
+  // a 14K quote uses the 14K rate on the same weight — cheaper piece
+  const q14 = (await api("/api/products/aurelia-solitaire-ring/quote?purity=14K")).data;
+  assert.ok(q14.price.metalRatePerGram < base.price.metalRatePerGram);
+  assert.ok(q14.price.total < base.price.total);
+  assert.equal(q14.note, "14K");
+
+  // a finer diamond band raises stone value and leaves the metal untouched
+  const qv = (await api("/api/products/aurelia-solitaire-ring/quote?quality=VVS-EF")).data;
+  assert.ok(qv.price.stoneValue > base.price.stoneValue);
+  assert.equal(qv.price.metalValue, base.price.metalValue);
+
+  // a bigger size carries more metal; the base size IS the catalogue price
+  const q18 = (await api("/api/products/aurelia-solitaire-ring/quote?size=18")).data;
+  assert.ok(q18.netWeight > base.metal.netWeight);
+  assert.ok(q18.price.metalValue > base.price.metalValue);
+  const q12 = (await api("/api/products/aurelia-solitaire-ring/quote?size=12")).data;
+  assert.equal(q12.price.total, base.price.total);
+
+  // invalid selections are refused, never silently substituted
+  assert.equal((await api("/api/products/aurelia-solitaire-ring/quote?quality=SI-XX")).status, 400);
+  assert.equal((await api("/api/products/aurelia-solitaire-ring/quote?purity=24K")).status, 400);
+  const silver = (await api("/api/products?metal=silver&limit=1")).data.items[0];
+  if (silver) assert.equal((await api(`/api/products/${silver.slug}/quote?purity=18K`)).status, 400);
+
+  // an order pays exactly the quoted price and records the variant on the line
+  const combo = (await api("/api/products/aurelia-solitaire-ring/quote?purity=14K&quality=SI-IJ&size=14")).data;
+  const placed = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, purity: "14K", quality: "SI-IJ", size: "14" }], {
+      customer: { name: "Variant Buyer", phone: "9800000081", address: "7 Variant Lane, Indore", pincode: "452001" },
+    }),
+  });
+  assert.equal(placed.status, 201);
+  const vLine = (await api("/api/admin/orders", { headers: ADMIN })).data.orders
+    .find((o) => o.orderId === placed.data.orderId).lines[0];
+  assert.equal(vLine.unitPrice, combo.price.total);
+  assert.equal(vLine.variantNote, "14K · SI IJ");
+  assert.deepEqual(vLine.custom, { purity: "14K", quality: "SI-IJ" });
+
+  // an impossible variant can never be ordered
+  const refused = await api("/api/orders", {
+    method: "POST", headers: JSONH,
+    body: order([{ slug: "aurelia-solitaire-ring", qty: 1, quality: "SI-XX" }]),
+  });
+  assert.equal(refused.status, 400);
+});
+
 test("rate console: instant mode + all-gold-purities update (single-operator manual publishing)", async () => {
   const before = await api("/api/admin/rates", { headers: ADMIN });
   assert.equal(before.data.makerChecker, true);
